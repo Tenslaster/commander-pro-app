@@ -99,16 +99,31 @@ jobs:
 
       - name: Install npm dependencies
         if: (steps.detect.outputs.type == 'reactnative' || steps.detect.outputs.type == 'expo') && steps.node-modules-cache.outputs.cache-hit != 'true'
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Expo prebuild (generate ios/ native project)
+        if: steps.detect.outputs.type == 'expo'
+        run: |
+          set -e
+          npx expo prebuild --platform ios --non-interactive --no-install
+          # Ensure workflow ios_path points at generated folder
+          if [ ! -d "ios" ]; then
+            echo "ERROR: expo prebuild did not create ios/"
+            exit 1
+          fi
+          echo "Generated ios/ contents:"
+          ls -la ios
 
       - name: Restore Pods cache
         uses: actions/cache@v4
         id: pods-cache
         with:
           path: |
+            ios/Pods
             ${{ inputs.ios_path }}/Pods
             ~/.cocoapods/repos
-          key: pods-${{ runner.os }}-${{ hashFiles(format('{0}/Podfile.lock', inputs.ios_path)) }}
+          key: pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', format('{0}/Podfile.lock', inputs.ios_path)) }}
           restore-keys: |
             pods-${{ runner.os }}-
 
@@ -157,6 +172,11 @@ jobs:
           CONFIGURATION: ${{ inputs.configuration }}
         run: |
           set -e
+
+          # Expo managed apps generate native code under ios/ via prebuild
+          if [ "$PROJECT_TYPE" = "expo" ] && [ -d "ios" ]; then
+            IOS_PATH="ios"
+          fi
 
           # Navigate to iOS project
           cd "$IOS_PATH"

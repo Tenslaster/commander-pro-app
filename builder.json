@@ -5,7 +5,11 @@
     "owner": "Tenslaster",
     "repo": "commander-pro-app"
   },
-  "ios": {},
+  "ios": {
+    "path": "ios",
+    "scheme": "CommanderPRO",
+    "signing": false
+  },
   "flutter": {
     "watch": {}
   },
