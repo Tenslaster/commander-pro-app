@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Expo / Metro
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native (if generated)
+ios/
+android/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs / OS
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+ios-builder-last-run.log
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local backups
+AppBackupDontEdit.js
+SHARE-WITH-FRIEND.txt
+start - Copie.bat
