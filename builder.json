@@ -1,0 +1,16 @@
+{
+  "project": "CommanderPRO",
+  "platform": "ios",
+  "github": {
+    "owner": "Tenslaster",
+    "repo": "commander-pro-app"
+  },
+  "ios": {},
+  "flutter": {
+    "watch": {}
+  },
+  "reactNative": {
+    "expo": true
+  },
+  "mobai": {}
+}
