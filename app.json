@@ -14,6 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.commanderpro.radios",
+      "icon": "./assets/icon.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSFaceIDUsageDescription": "Unlock Commander PRO with Face ID.",
@@ -30,6 +31,7 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
+      "icon": "./assets/icon.png",
       "softwareKeyboardLayoutMode": "pan",
       "permissions": [
         "android.permission.VIBRATE",
@@ -62,7 +64,8 @@
       [
         "expo-notifications",
         {
-          "color": "#38bdf8"
+          "icon": "./assets/notification-icon.png",
+          "color": "#f97316"
         }
       ]
     ]
