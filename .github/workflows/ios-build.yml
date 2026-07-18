@@ -104,8 +104,11 @@ jobs:
 
       - name: Expo prebuild (generate ios/ native project)
         if: steps.detect.outputs.type == 'expo'
+        env:
+          EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
         run: |
           set -e
+          echo "EXPO_PUBLIC_API_URL=$EXPO_PUBLIC_API_URL"
           npx expo prebuild --platform ios --non-interactive --no-install
           # Ensure workflow ios_path points at generated folder
           if [ ! -d "ios" ]; then
@@ -170,8 +173,10 @@ jobs:
           PROJECT_TYPE: ${{ steps.detect.outputs.type }}
           USE_SIGNING: ${{ inputs.use_signing }}
           CONFIGURATION: ${{ inputs.configuration }}
+          EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
         run: |
           set -e
+          export EXPO_PUBLIC_API_URL="${EXPO_PUBLIC_API_URL:-https://crew.kingdom.forum/api}"
 
           # Expo managed apps generate native code under ios/ via prebuild
           if [ "$PROJECT_TYPE" = "expo" ] && [ -d "ios" ]; then

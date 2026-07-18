@@ -71,7 +71,10 @@ if (Platform.OS === 'android' && !IS_EXPO_GO) {
   });
 }
 
-const API_URL = (process.env.EXPO_PUBLIC_API_URL || '').replace(/\/+$/, '');
+// Production default baked in so EAS APK/IPA work even when .env is gitignored.
+// Override locally with EXPO_PUBLIC_API_URL in .env if needed.
+const DEFAULT_API_URL = 'https://crew.kingdom.forum/api';
+const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
 /** Base host without trailing /api — used for /api/chat/media/... images */
 const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 
