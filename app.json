@@ -2,7 +2,7 @@
   "expo": {
     "name": "Commander PRO",
     "slug": "iphone-batch-manager",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -65,7 +65,10 @@
         "expo-notifications",
         {
           "icon": "./assets/notification-icon.png",
-          "color": "#f97316"
+          "color": "#f97316",
+          "defaultChannel": "commander-pro",
+          "sounds": [],
+          "mode": "production"
         }
       ]
     ]

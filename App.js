@@ -37,19 +37,31 @@ import * as ImagePicker from 'expo-image-picker';
 import { LANG_KEY, createT, normalizeLang } from './i18n';
 
 /**
- * Expo Go (store client) — remote push was removed from Expo Go in SDK 53+.
- * We still use the in-app alerts feed; only skip getExpoPushToken / remote push.
+ * Runtime client:
+ * - Expo Go  → testing (in-app feed + local OS banners under Expo Go)
+ * - Standalone APK/IPA → real remote push under app name "Commander PRO"
  */
 const IS_EXPO_GO =
   Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
   Constants.appOwnership === 'expo';
+const IS_STANDALONE =
+  !IS_EXPO_GO &&
+  (Constants.executionEnvironment === ExecutionEnvironment.Standalone ||
+    Constants.executionEnvironment === ExecutionEnvironment.Bare ||
+    Constants.appOwnership === 'standalone' ||
+    // EAS production / preview builds
+    !Constants.appOwnership);
+/** Push channel id — must match server `channelId` for Android APK */
+const NOTIF_CHANNEL_MAIN = 'commander-pro';
+const NOTIF_CHANNEL_CHAT = 'commander-pro-chat';
+const NOTIF_CHANNEL_DEFAULT = 'default';
 
-// Local / foreground notification presentation (safe in Expo Go)
+// Show banners in foreground for both Expo Go and standalone builds
 try {
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
       shouldPlaySound: true,
-      shouldSetBadge: false,
+      shouldSetBadge: true,
       shouldShowBanner: true,
       shouldShowList: true,
     }),
@@ -58,19 +70,42 @@ try {
   /* ignore */
 }
 
-/** Android 8+ local channel (not remote FCM — that needs a dev/prod build) */
-if (Platform.OS === 'android' && !IS_EXPO_GO) {
-  Notifications.setNotificationChannelAsync('default', {
-    name: 'Commander PRO',
+/** Android notification channels (Expo Go + APK). APK uses branded name. */
+async function setupAndroidNotificationChannels() {
+  if (Platform.OS !== 'android') return;
+  const mainName = IS_EXPO_GO ? 'Commander PRO (test)' : 'Commander PRO';
+  const common = {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 250, 250, 250],
-    lightColor: '#38bdf8',
+    lightColor: '#f97316',
     sound: 'default',
     enableVibrate: true,
-  }).catch(() => {
+    showBadge: true,
+  };
+  try {
+    await Notifications.setNotificationChannelAsync(NOTIF_CHANNEL_MAIN, {
+      ...common,
+      name: mainName,
+      description: IS_EXPO_GO
+        ? 'Alerts while testing in Expo Go'
+        : 'Alerts, status and admin notifications',
+    });
+    await Notifications.setNotificationChannelAsync(NOTIF_CHANNEL_CHAT, {
+      ...common,
+      name: IS_EXPO_GO ? 'Chat (test)' : 'Commander PRO Chat',
+      description: 'Chat messages',
+      importance: Notifications.AndroidImportance.HIGH,
+    });
+    // Fallback channel used by some Expo payloads
+    await Notifications.setNotificationChannelAsync(NOTIF_CHANNEL_DEFAULT, {
+      ...common,
+      name: mainName,
+    });
+  } catch {
     /* ignore */
-  });
+  }
 }
+setupAndroidNotificationChannels();
 
 // Production default baked in so EAS APK/IPA work even when .env is gitignored.
 // Override locally with EXPO_PUBLIC_API_URL in .env if needed.
@@ -84,7 +119,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.1.0';
+  '1.2.0';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 
@@ -1856,41 +1891,111 @@ function AppInner() {
     prevStatusReadyRef.current = false;
   }, []);
 
+  /**
+   * Register device for remote push.
+   * - Standalone APK/IPA: always (shows as "Commander PRO", not Expo Go)
+   * - Expo Go: try for older clients; SDK 53+ has no remote push — feed + local notifs remain
+   */
   const registerForPushNotificationsAsync = useCallback(async (validToken) => {
-    // SDK 53+: remote push is not available in Expo Go — skip quietly
-    if (IS_EXPO_GO) return;
     if (!validToken) return;
     try {
+      await setupAndroidNotificationChannels();
+
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
       if (existingStatus !== 'granted') {
         const { status } = await Notifications.requestPermissionsAsync();
         finalStatus = status;
       }
-      if (finalStatus !== 'granted') return;
+      if (finalStatus !== 'granted') {
+        if (__DEV__) console.warn('Notification permission not granted');
+        return;
+      }
 
       const projectId =
-        Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+        Constants.expoConfig?.extra?.eas?.projectId ??
+        Constants.easConfig?.projectId ??
+        'ad3981e1-443b-40ec-9a35-83052e532a16';
+
+      // Expo Go (SDK 53+): remote push removed — do not fail the app
+      if (IS_EXPO_GO) {
+        try {
+          const expoToken = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+          if (expoToken) {
+            await apiFetch('/register_token', {
+              method: 'POST',
+              token: validToken,
+              body: {
+                token: expoToken,
+                client: 'expo-go',
+                platform: Platform.OS,
+                app_version: APP_VERSION,
+                channel_id: NOTIF_CHANNEL_MAIN,
+              },
+            });
+          }
+        } catch (goErr) {
+          // Expected on modern Expo Go — use in-app feed + local banners only
+          if (__DEV__) {
+            console.log(
+              'Expo Go: remote push unavailable (use APK/IPA for real push).',
+              goErr?.message || goErr
+            );
+          }
+        }
+        return;
+      }
+
+      // Standalone / production build — real device push under app identity
       if (!projectId) {
-        console.warn('EAS Project ID missing.');
+        console.warn('EAS Project ID missing — cannot register push.');
         return;
       }
 
       const expoToken = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+      if (!expoToken) return;
+
       await apiFetch('/register_token', {
         method: 'POST',
         token: validToken,
-        body: { token: expoToken },
+        body: {
+          token: expoToken,
+          client: 'standalone',
+          platform: Platform.OS,
+          app_version: APP_VERSION,
+          channel_id: NOTIF_CHANNEL_MAIN,
+          // Drop Expo Go tokens for this role so test installs stop getting push
+          replace_expo_go: true,
+        },
       });
     } catch (error) {
       if (error.code === 'UNAUTHORIZED') {
         handleLogout();
         return;
       }
-      // Don't spam console for unsupported environments
       if (__DEV__) console.warn('Failed to register push token:', error?.message || error);
     }
   }, [handleLogout]);
+
+  /** Expo Go testing: fire a local OS notification (appears under Expo Go). */
+  const presentLocalTestNotification = useCallback(async (title, body, data = {}) => {
+    if (!IS_EXPO_GO) return;
+    try {
+      await setupAndroidNotificationChannels();
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: title || 'Commander PRO',
+          body: body || '',
+          sound: true,
+          data: { ...data, local: true, client: 'expo-go' },
+          ...(Platform.OS === 'android' ? { channelId: NOTIF_CHANNEL_MAIN } : {}),
+        },
+        trigger: null,
+      });
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const unlockWithSession = useCallback(
     (
@@ -2427,9 +2532,24 @@ function AppInner() {
           if (fresh.length === 1) {
             showBanner(fresh[0].title || 'Nouvelle notification', 'warn');
             lightVibrate();
+            // Expo Go: no reliable remote push — mirror as local OS notification for testing
+            if (IS_EXPO_GO) {
+              presentLocalTestNotification(
+                fresh[0].title || 'Commander PRO',
+                fresh[0].body || fresh[0].title || '',
+                { kind: fresh[0].type || 'alert', id: fresh[0].id }
+              );
+            }
           } else if (fresh.length > 1) {
             showBanner(`${fresh.length} nouvelles notifications`, 'warn');
             lightVibrate();
+            if (IS_EXPO_GO) {
+              presentLocalTestNotification(
+                'Commander PRO',
+                `${fresh.length} nouvelles notifications`,
+                { kind: 'alert_batch', count: fresh.length }
+              );
+            }
           }
         }
         knownNotifyIdsRef.current = new Set(items.map((it) => it.id).filter(Boolean));
@@ -2444,7 +2564,14 @@ function AppInner() {
         if (!silent && mountedRef.current) setNotifyLoading(false);
       }
     },
-    [handleLogout, markNotificationsRead, notifyFilter, notifyStation, showBanner]
+    [
+      handleLogout,
+      markNotificationsRead,
+      notifyFilter,
+      notifyStation,
+      showBanner,
+      presentLocalTestNotification,
+    ]
   );
 
   const openNotificationFeed = useCallback(() => {
@@ -4411,10 +4538,11 @@ function AppInner() {
     return () => clearInterval(interval);
   }, [isUnlocked, activeChat?.id, fetchChatMessages, fetchTyping]);
 
-  // Notification tap / receive — only useful outside Expo Go (remote push).
-  // In Expo Go, chat/alerts still refresh via polling (no OS push).
+  // Notification tap / receive
+  // - Standalone: remote Expo push (app icon / name)
+  // - Expo Go: local notifications scheduled for testing + any push if available
   useEffect(() => {
-    if (!isUnlocked || IS_EXPO_GO) return undefined;
+    if (!isUnlocked) return undefined;
 
     let receivedSub;
     let responseSub;

@@ -14,6 +14,7 @@ Cloudflare Tunnel should send path /downloads* to this server.
 from __future__ import annotations
 
 import html
+import json
 import mimetypes
 import os
 import sys
@@ -34,11 +35,27 @@ APK_NAME = "CommanderPro.apk"
 IPA_NAME = "CommanderPro.ipa"
 APK_PATH = DIST / "apk" / APK_NAME
 IPA_PATH = DIST / "ipa" / IPA_NAME
+APP_JSON = ROOT / "app.json"
 
 PREFIX = "/downloads"
 
 mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 mimetypes.add_type("application/octet-stream", ".ipa")
+
+
+def _app_version() -> str:
+    """Read version from app.json (same as Expo builds)."""
+    env = (os.environ.get("APP_VERSION") or "").strip()
+    if env:
+        return env
+    try:
+        data = json.loads(APP_JSON.read_text(encoding="utf-8"))
+        v = (data.get("expo") or {}).get("version") or data.get("version")
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return "—"
 
 
 def _size_label(path: Path) -> str:
@@ -55,9 +72,11 @@ def _size_label(path: Path) -> str:
 def _page() -> bytes:
     apk_ok = APK_PATH.is_file()
     ipa_ok = IPA_PATH.is_file()
+    version = _app_version()
 
     def card(platform: str, label: str, ok: bool, size: str, href: str) -> str:
         size_txt = html.escape(size) if ok else "Unavailable"
+        ver_badge = html.escape(version) if version and version != "—" else "—"
         btn = (
             f'<a class="btn" href="{html.escape(href)}" download>{html.escape(label)}</a>'
             if ok
@@ -67,7 +86,7 @@ def _page() -> bytes:
         <div class="card">
           <div class="row">
             <div>
-              <h2>{html.escape(platform)}</h2>
+              <h2>{html.escape(platform)} <span class="ver">v{ver_badge}</span></h2>
               <p class="meta">{size_txt}</p>
             </div>
             {btn}
@@ -113,6 +132,17 @@ def _page() -> bytes:
       text-transform: uppercase;
       color: #38bdf8;
     }}
+    .version-pill {{
+      display: inline-block;
+      margin-top: 12px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #7dd3fc;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+    }}
     .card {{
       background: #0b1220;
       border: 1px solid #1e293b;
@@ -131,6 +161,12 @@ def _page() -> bytes:
       font-size: 1rem;
       font-weight: 600;
       color: #f1f5f9;
+    }}
+    .ver {{
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #38bdf8;
+      margin-left: 4px;
     }}
     .meta {{
       margin: 0;
@@ -163,6 +199,7 @@ def _page() -> bytes:
     <header>
       <div class="brand">Commander PRO</div>
       <h1>Downloads</h1>
+      <div class="version-pill">Version {html.escape(version)}</div>
     </header>
     {card("Android", "Download APK", apk_ok, _size_label(APK_PATH), f"{PREFIX}/apk")}
     {card("iPhone", "Download IPA", ipa_ok, _size_label(IPA_PATH), f"{PREFIX}/ipa")}
