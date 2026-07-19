@@ -2,7 +2,7 @@
   "expo": {
     "name": "Commander PRO",
     "slug": "iphone-batch-manager",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -20,7 +20,9 @@
         "NSFaceIDUsageDescription": "Unlock Commander PRO with Face ID.",
         "NSPhotoLibraryUsageDescription": "Send photos in Commander PRO chat.",
         "NSCameraUsageDescription": "Take a photo for Commander PRO chat.",
-        "UIBackgroundModes": ["remote-notification"]
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       }
     },
     "android": {
