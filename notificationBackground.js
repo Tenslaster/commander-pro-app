@@ -1,13 +1,15 @@
 /**
- * Android background notification poll (no FCM required).
+ * Background notification poll without remote push credentials.
  * TaskManager.defineTask MUST load before App mounts (import from index.js).
  *
  * How it works:
- * - OS wakes the app periodically (BackgroundFetch, often ~15 min on Android)
+ * - OS wakes the app periodically (BackgroundFetch; often ~15 min, iOS more aggressive)
  * - We pull /api/notifications with the saved session token
- * - New items → local OS notifications (works in background without FCM)
+ * - New items → local OS notifications
  *
- * True instant push still needs FCM on EAS; this is the practical bypass.
+ * Instant remote push still needs:
+ *   Android: FCM on EAS  |  iOS: Apple Developer + APNs key on EAS
+ * This path is the fallback when those are missing (e.g. no Apple Dev account).
  */
 import * as TaskManager from 'expo-task-manager';
 import * as BackgroundFetch from 'expo-background-fetch';
@@ -21,7 +23,7 @@ const BG_LAST_TS_KEY = 'bg_notify_last_ts';
 const API_URL = (
   process.env.EXPO_PUBLIC_API_URL || 'https://crew.kingdom.forum/api'
 ).replace(/\/+$/, '');
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.3.3';
 const CHANNEL = 'commander-pro';
 
 async function ensureAndroidChannel() {
@@ -125,13 +127,15 @@ if (!TaskManager.isTaskDefined(BG_NOTIFY_TASK)) {
 }
 
 /**
- * Register periodic background poll (Android APK mainly; iOS is more limited).
+ * Register periodic background poll (Android + iOS).
+ * iOS requires "Background App Refresh" enabled for the app; OS still throttles hard.
  */
 export async function startBackgroundNotifyFetch() {
   try {
     await ensureAndroidChannel();
-    // Prefer ~2 min minimum request; OS may throttle (often ~15 min)
-    await BackgroundFetch.setMinimumIntervalAsync(120);
+    // Request frequent wakeups; OS decides real interval (often 15+ min)
+    const minInterval = Platform.OS === 'ios' ? 60 : 120;
+    await BackgroundFetch.setMinimumIntervalAsync(minInterval);
 
     const status = await BackgroundFetch.getStatusAsync();
     if (
@@ -145,7 +149,7 @@ export async function startBackgroundNotifyFetch() {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(BG_NOTIFY_TASK);
     if (!isRegistered) {
       await BackgroundFetch.registerTaskAsync(BG_NOTIFY_TASK, {
-        minimumInterval: 120,
+        minimumInterval: minInterval,
         stopOnTerminate: false,
         startOnBoot: true,
       });

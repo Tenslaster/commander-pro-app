@@ -280,6 +280,10 @@ const STRINGS = {
     'update.yourVersion': 'Votre version',
     'update.required': 'Requis',
     'update.latest': 'Dernière',
+    'update.softTitle': 'Mise à jour disponible',
+    'update.softBody':
+      'Une nouvelle version de Commander PRO est disponible. Tu peux continuer et mettre à jour plus tard.',
+    'update.later': 'Plus tard',
   },
 
   en: {
@@ -554,6 +558,10 @@ const STRINGS = {
     'update.yourVersion': 'Your version',
     'update.required': 'Required',
     'update.latest': 'Latest',
+    'update.softTitle': 'Update available',
+    'update.softBody':
+      'A new Commander PRO version is available. You can keep using the app and update later.',
+    'update.later': 'Later',
   },
 };
 

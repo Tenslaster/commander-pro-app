@@ -36,6 +36,7 @@ IPA_NAME = "CommanderPro.ipa"
 APK_PATH = DIST / "apk" / APK_NAME
 IPA_PATH = DIST / "ipa" / IPA_NAME
 APP_JSON = ROOT / "app.json"
+VERSIONS_JSON = DIST / "versions.json"
 
 PREFIX = "/downloads"
 
@@ -43,8 +44,8 @@ mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 mimetypes.add_type("application/octet-stream", ".ipa")
 
 
-def _app_version() -> str:
-    """Read version from app.json (same as Expo builds)."""
+def _app_version_fallback() -> str:
+    """Fallback single version from env or app.json."""
     env = (os.environ.get("APP_VERSION") or "").strip()
     if env:
         return env
@@ -57,6 +58,28 @@ def _app_version() -> str:
     except Exception:
         pass
     return "—"
+
+
+def _platform_versions() -> dict[str, str]:
+    """
+    Per-platform display versions (APK and IPA can differ).
+    Prefer dist/versions.json so the download page matches published binaries.
+    """
+    android = (os.environ.get("APK_VERSION") or "").strip()
+    ios = (os.environ.get("IPA_VERSION") or "").strip()
+    try:
+        if VERSIONS_JSON.is_file():
+            data = json.loads(VERSIONS_JSON.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict):
+                android = android or str(data.get("android") or data.get("apk") or "").strip()
+                ios = ios or str(data.get("ios") or data.get("ipa") or "").strip()
+    except Exception:
+        pass
+    fallback = _app_version_fallback()
+    return {
+        "android": android or fallback,
+        "ios": ios or fallback,
+    }
 
 
 def _size_label(path: Path) -> str:
@@ -73,9 +96,16 @@ def _size_label(path: Path) -> str:
 def _page() -> bytes:
     apk_ok = APK_PATH.is_file()
     ipa_ok = IPA_PATH.is_file()
-    version = _app_version()
+    versions = _platform_versions()
+    v_android = versions["android"]
+    v_ios = versions["ios"]
+    pill = (
+        f"Android {v_android} · iPhone {v_ios}"
+        if v_android != v_ios
+        else f"Version {v_android}"
+    )
 
-    def card(platform: str, label: str, ok: bool, size: str, href: str) -> str:
+    def card(platform: str, label: str, ok: bool, size: str, href: str, version: str) -> str:
         size_txt = html.escape(size) if ok else "Unavailable"
         ver_badge = html.escape(version) if version and version != "—" else "—"
         btn = (
@@ -200,10 +230,10 @@ def _page() -> bytes:
     <header>
       <div class="brand">Commander PRO</div>
       <h1>Downloads</h1>
-      <div class="version-pill">Version {html.escape(version)}</div>
+      <div class="version-pill">{html.escape(pill)}</div>
     </header>
-    {card("Android", "Download APK", apk_ok, _size_label(APK_PATH), f"{PREFIX}/apk")}
-    {card("iPhone", "Download IPA", ipa_ok, _size_label(IPA_PATH), f"{PREFIX}/ipa")}
+    {card("Android", "Download APK", apk_ok, _size_label(APK_PATH), f"{PREFIX}/apk", v_android)}
+    {card("iPhone", "Download IPA", ipa_ok, _size_label(IPA_PATH), f"{PREFIX}/ipa", v_ios)}
   </div>
 </body>
 </html>

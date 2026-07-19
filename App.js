@@ -125,7 +125,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.2';
+  '1.3.3';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 
@@ -154,6 +154,64 @@ function compareAppVersions(a, b) {
 function isAppVersionBlocked(clientVersion, minVersion) {
   if (!minVersion) return false;
   return compareAppVersions(clientVersion || '0.0.0', minVersion) < 0;
+}
+
+/** True when client is older than recommended latest (soft update). */
+function isAppVersionBehind(clientVersion, latestVersion) {
+  if (!latestVersion) return false;
+  return compareAppVersions(clientVersion || '0.0.0', latestVersion) < 0;
+}
+
+/** Platform-aware "latest" from API policy (falls back to built-in publish targets). */
+function resolveLatestAppVersion(policy) {
+  if (!policy || typeof policy !== 'object') {
+    return Platform.OS === 'ios' ? '1.3.1' : '1.3.3';
+  }
+  if (Platform.OS === 'ios') {
+    return (
+      policy.latest_app_version_ios ||
+      policy.latestAppVersionIos ||
+      policy.min_app_version ||
+      '1.3.1'
+    );
+  }
+  if (Platform.OS === 'android') {
+    return (
+      policy.latest_app_version_android ||
+      policy.latestAppVersionAndroid ||
+      policy.latest_app_version ||
+      '1.3.3'
+    );
+  }
+  return policy.latest_app_version || policy.min_app_version || APP_VERSION;
+}
+
+function resolveUpdateDownloadUrl(policy) {
+  if (!policy || typeof policy !== 'object') return DEFAULT_DOWNLOAD_URL;
+  if (Platform.OS === 'ios') {
+    return policy.download_ipa_url || policy.download_url || DEFAULT_DOWNLOAD_URL;
+  }
+  if (Platform.OS === 'android') {
+    return policy.download_apk_url || policy.download_url || DEFAULT_DOWNLOAD_URL;
+  }
+  return policy.download_url || DEFAULT_DOWNLOAD_URL;
+}
+
+/** Local calendar day key for once-per-day soft update nag. */
+function localDateKey() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function softUpdateSeenKey(userKey, latestVersion) {
+  const u = String(userKey || 'anon')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .slice(0, 48);
+  return `soft_update_seen_${u}_${String(latestVersion || 'x')}_${localDateKey()}`;
 }
 
 const mediaUrl = (path) => {
@@ -681,8 +739,7 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
 
 /** Full-screen gate when API requires a newer app build */
 function ForceUpdateScreen({ policy, lang, t }) {
-  const downloadUrl =
-    (policy && policy.download_url) || DEFAULT_DOWNLOAD_URL;
+  const downloadUrl = resolveUpdateDownloadUrl(policy);
   const msg =
     lang === 'en'
       ? policy?.message_en ||
@@ -692,7 +749,7 @@ function ForceUpdateScreen({ policy, lang, t }) {
         t('update.body') ||
         "Cette version n'est plus supportée. Téléchargez la mise à jour.";
   const minV = policy?.min_app_version || '—';
-  const latestV = policy?.latest_app_version || minV;
+  const latestV = resolveLatestAppVersion(policy) || minV;
 
   return (
     <View style={styles.forceUpdateScreen}>
@@ -725,6 +782,73 @@ function ForceUpdateScreen({ policy, lang, t }) {
         {downloadUrl}
       </Text>
     </View>
+  );
+}
+
+/**
+ * Soft update prompt (same look as force, but dismissible).
+ * Shown at most once per user per calendar day while version is behind latest.
+ */
+function SoftUpdateModal({ visible, policy, lang, t, onLater, onDownload }) {
+  if (!visible || !policy) return null;
+  const downloadUrl = resolveUpdateDownloadUrl(policy);
+  const latestV = resolveLatestAppVersion(policy);
+  const msg =
+    lang === 'en'
+      ? policy?.soft_message_en ||
+        policy?.message_en ||
+        t('update.softBody') ||
+        'A new version is available. You can update later.'
+      : policy?.soft_message_fr ||
+        policy?.message_fr ||
+        t('update.softBody') ||
+        'Une nouvelle version est disponible. Tu peux mettre à jour plus tard.';
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onLater}
+    >
+      <View style={styles.softUpdateOverlay}>
+        <View style={styles.softUpdateCard}>
+          <Ionicons name="cloud-download-outline" size={48} color="#38bdf8" />
+          <Text style={styles.softUpdateTitle}>
+            {t('update.softTitle') || 'Mise à jour disponible'}
+          </Text>
+          <Text style={styles.softUpdateBody}>{msg}</Text>
+          <Text style={styles.softUpdateMeta}>
+            {t('update.yourVersion') || 'Votre version'}: {APP_VERSION}
+            {'  ·  '}
+            {t('update.latest') || 'Dernière'}: {latestV}
+          </Text>
+          <TouchableOpacity
+            style={styles.softUpdatePrimaryBtn}
+            onPress={() => {
+              if (typeof onDownload === 'function') onDownload(downloadUrl);
+              else {
+                Linking.openURL(downloadUrl).catch(() => {
+                  Alert.alert(t('update.softTitle') || 'Update', downloadUrl);
+                });
+              }
+            }}
+          >
+            <Text style={styles.softUpdatePrimaryText}>
+              {t('update.download') || 'Télécharger'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.softUpdateLaterBtn} onPress={onLater}>
+            <Text style={styles.softUpdateLaterText}>
+              {t('update.later') || 'Plus tard'}
+            </Text>
+          </TouchableOpacity>
+          <Text style={styles.softUpdateHint} selectable numberOfLines={2}>
+            {downloadUrl}
+          </Text>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -1529,6 +1653,9 @@ function AppInner() {
   const [isReady, setIsReady] = useState(false);
   /** When set, app is blocked until user installs a newer APK/IPA */
   const [forceUpdatePolicy, setForceUpdatePolicy] = useState(null);
+  /** Soft update sheet (optional, once per user per day) */
+  const [softUpdatePolicy, setSoftUpdatePolicy] = useState(null);
+  const versionPolicyRef = useRef(null);
   const [biometricGate, setBiometricGate] = useState(false);
   const [biometricHardwareOk, setBiometricHardwareOk] = useState(false);
   const [biometricEnabled, setBiometricEnabled] = useState(false);
@@ -2045,8 +2172,12 @@ function AppInner() {
           pushWarnOnceRef.current = true;
           showBanner(
             en
-              ? 'Alerts: local mode (open app to see them). Remote needs FCM/APNs.'
-              : 'Alertes: mode local (garde l’app ouverte). Push distant = FCM/APNs.',
+              ? IS_IOS
+                ? 'iOS: local alerts (no Apple Developer / APNs). Keep Background App Refresh on.'
+                : 'Alerts: local mode. Remote push needs FCM on Android.'
+              : IS_IOS
+                ? 'iOS: alertes locales (pas de compte Apple Dev / APNs). Active le Rafraîchissement en arrière-plan.'
+                : 'Alertes: mode local. Push distant Android = FCM.',
             'info'
           );
         }
@@ -2141,8 +2272,8 @@ function AppInner() {
         const t1 = setTimeout(() => {
           if (authTokenRef.current !== token || !mountedRef.current) return;
           registerForPushNotificationsAsync(token).then((ok) => {
-            // Android: start background poll so alerts work without FCM
-            if (IS_ANDROID && authTokenRef.current === token) {
+            // Standalone (Android no FCM / iOS no APNs): poll feed + local OS notifs
+            if (!IS_EXPO_GO && authTokenRef.current === token) {
               startBackgroundNotifyFetch().catch(() => {});
             }
             if (!ok && authTokenRef.current === token && mountedRef.current) {
@@ -2198,25 +2329,113 @@ function AppInner() {
   const applyForceUpdatePolicy = useCallback((policy) => {
     if (!policy || typeof policy !== 'object') return false;
     const minV = policy.min_app_version || policy.minAppVersion;
+    // Only hard-block when server says force AND client is below min
     const force =
-      policy.force_update !== false &&
-      (policy.code === 'FORCE_UPDATE' ||
-        policy.force_update === true ||
-        !!minV);
+      policy.code === 'FORCE_UPDATE' ||
+      policy.force_update === true ||
+      policy.forceUpdate === true;
     if (!force || !minV) return false;
     if (!isAppVersionBlocked(APP_VERSION, minV)) return false;
     if (mountedRef.current) {
       setForceUpdatePolicy({
         min_app_version: minV,
-        latest_app_version: policy.latest_app_version || minV,
+        latest_app_version: resolveLatestAppVersion(policy),
+        latest_app_version_android: policy.latest_app_version_android,
+        latest_app_version_ios: policy.latest_app_version_ios,
         download_url: policy.download_url || DEFAULT_DOWNLOAD_URL,
+        download_apk_url: policy.download_apk_url,
+        download_ipa_url: policy.download_ipa_url,
         message_fr: policy.message_fr || policy.error || '',
         message_en: policy.message_en || policy.error || '',
         api_version: policy.api_version || policy.version,
       });
+      setSoftUpdatePolicy(null);
     }
     return true;
   }, []);
+
+  /**
+   * Optional update prompt (not blocking). Once per user per calendar day
+   * while the installed build is behind platform latest.
+   */
+  const maybeOfferSoftUpdate = useCallback(async (policy, userKey) => {
+    if (!policy || typeof policy !== 'object') return false;
+    if (!mountedRef.current) return false;
+    // Never soft-nag when hard force is already up
+    if (forceUpdatePolicy) return false;
+    const minV = policy.min_app_version || policy.minAppVersion;
+    // If below min and force is on, hard path handles it
+    if (
+      minV &&
+      isAppVersionBlocked(APP_VERSION, minV) &&
+      (policy.force_update === true || policy.code === 'FORCE_UPDATE')
+    ) {
+      return false;
+    }
+    const latestV = resolveLatestAppVersion(policy);
+    if (!isAppVersionBehind(APP_VERSION, latestV)) return false;
+
+    const storeKey = softUpdateSeenKey(userKey, latestV);
+    try {
+      const seen = await SecureStore.getItemAsync(storeKey, SECURE_OPTS);
+      if (seen === '1') return false;
+    } catch {
+      /* ignore store errors — still show once this session via state */
+    }
+
+    if (!mountedRef.current) return false;
+    setSoftUpdatePolicy({
+      min_app_version: minV,
+      latest_app_version: latestV,
+      latest_app_version_android: policy.latest_app_version_android,
+      latest_app_version_ios: policy.latest_app_version_ios,
+      download_url: policy.download_url || DEFAULT_DOWNLOAD_URL,
+      download_apk_url: policy.download_apk_url,
+      download_ipa_url: policy.download_ipa_url,
+      soft_message_fr: policy.soft_message_fr || '',
+      soft_message_en: policy.soft_message_en || '',
+      message_fr: policy.message_fr || '',
+      message_en: policy.message_en || '',
+      _userKey: userKey || 'anon',
+      _latest: latestV,
+    });
+    return true;
+  }, [forceUpdatePolicy]);
+
+  const dismissSoftUpdate = useCallback(async () => {
+    const p = softUpdatePolicy;
+    setSoftUpdatePolicy(null);
+    if (!p) return;
+    const latestV = p._latest || resolveLatestAppVersion(p);
+    const userKey = p._userKey || appUsername || 'anon';
+    try {
+      await SecureStore.setItemAsync(
+        softUpdateSeenKey(userKey, latestV),
+        '1',
+        SECURE_OPTS
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [softUpdatePolicy, appUsername]);
+
+  // Soft update once the session user is known (or anon on login screen)
+  useEffect(() => {
+    if (!isReady || forceUpdatePolicy) return;
+    const policy = versionPolicyRef.current;
+    if (!policy) return;
+    const uk = appUsername || userRole || 'anon';
+    const t = setTimeout(() => {
+      maybeOfferSoftUpdate(policy, uk).catch(() => {});
+    }, 700);
+    return () => clearTimeout(t);
+  }, [
+    isReady,
+    forceUpdatePolicy,
+    appUsername,
+    userRole,
+    maybeOfferSoftUpdate,
+  ]);
 
   useEffect(() => {
     async function boot() {
@@ -2226,12 +2445,17 @@ function AppInner() {
         // 1) Version gate vs API (must run even if offline → skip, not force)
         try {
           const health = await apiFetch('/health', { timeoutMs: 12000 });
-          if (health && applyForceUpdatePolicy(health)) {
-            if (mountedRef.current) setIsReady(true);
-            return;
+          if (health) {
+            versionPolicyRef.current = health;
+            if (applyForceUpdatePolicy(health)) {
+              if (mountedRef.current) setIsReady(true);
+              return;
+            }
+            // Soft update after we know stored username (below) or anon for now
           }
         } catch (healthErr) {
           if (healthErr?.code === 'FORCE_UPDATE' && healthErr.policy) {
+            versionPolicyRef.current = healthErr.policy;
             applyForceUpdatePolicy(healthErr.policy);
             if (mountedRef.current) setIsReady(true);
             return;
@@ -4579,21 +4803,21 @@ function AppInner() {
 
   // --- LIFECYCLE ---
 
-  // Pause polls when app is backgrounded (tab out) so failed requests don't look like errors
-  // Android: while process still alive, keep a short interval poll + fire local notifs (no FCM)
-  const androidBgIntervalRef = useRef(null);
+  // Pause heavy polls when backgrounded; still pull notify feed for local OS alerts
+  // (Android without FCM + iOS without APNs / no Apple Developer account)
+  const bgPollIntervalRef = useRef(null);
   useEffect(() => {
-    const clearAndroidBg = () => {
-      if (androidBgIntervalRef.current) {
-        clearInterval(androidBgIntervalRef.current);
-        androidBgIntervalRef.current = null;
+    const clearBgPoll = () => {
+      if (bgPollIntervalRef.current) {
+        clearInterval(bgPollIntervalRef.current);
+        bgPollIntervalRef.current = null;
       }
     };
     const onChange = (next) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
       if (prev.match(/inactive|background/) && next === 'active') {
-        clearAndroidBg();
+        clearBgPoll();
         // Coming back: quiet refresh, reset fail counter
         netFailCountRef.current = 0;
         if (authTokenRef.current) {
@@ -4605,26 +4829,27 @@ function AppInner() {
           if (!IS_EXPO_GO && !pushOkRef.current) {
             registerForPushNotificationsAsync(authTokenRef.current);
           }
-          if (IS_ANDROID && !IS_EXPO_GO) {
+          if (!IS_EXPO_GO) {
             startBackgroundNotifyFetch().catch(() => {});
           }
         }
       } else if (next.match(/inactive|background/) && authTokenRef.current) {
-        // Immediate poll when leaving foreground
-        if (IS_ANDROID && !IS_EXPO_GO) {
+        // Immediate poll when leaving foreground (local OS notification if new feed items)
+        if (!IS_EXPO_GO) {
           pollNotifyOnceInBackground().catch(() => {});
-          clearAndroidBg();
-          // Keep polling every 25s while Android keeps the JS process alive
-          androidBgIntervalRef.current = setInterval(() => {
+          clearBgPoll();
+          // Keep polling while OS keeps JS alive (Android ~OK; iOS often suspends quickly)
+          const intervalMs = IS_IOS ? 45000 : 25000;
+          bgPollIntervalRef.current = setInterval(() => {
             if (!authTokenRef.current) return;
             pollNotifyOnceInBackground().catch(() => {});
-          }, 25000);
+          }, intervalMs);
         }
       }
     };
     const sub = AppState.addEventListener('change', onChange);
     return () => {
-      clearAndroidBg();
+      clearBgPoll();
       sub.remove();
     };
   }, [
@@ -5297,23 +5522,42 @@ function AppInner() {
     return <ForceUpdateScreen policy={forceUpdatePolicy} lang={lang} t={t} />;
   }
 
+  const softUpdateOverlay = (
+    <SoftUpdateModal
+      visible={!!softUpdatePolicy}
+      policy={softUpdatePolicy}
+      lang={lang}
+      t={t}
+      onLater={dismissSoftUpdate}
+      onDownload={(url) => {
+        dismissSoftUpdate();
+        Linking.openURL(url || DEFAULT_DOWNLOAD_URL).catch(() => {
+          Alert.alert(t('update.softTitle') || 'Update', url || DEFAULT_DOWNLOAD_URL);
+        });
+      }}
+    />
+  );
+
   if (!isUnlocked) {
     return (
-      <LockScreen
-        usernameInput={usernameInput}
-        setUsernameInput={setUsernameInput}
-        passwordInput={passwordInput}
-        setPasswordInput={setPasswordInput}
-        loginError={loginError}
-        loginErrorMsg={loginErrorMsg}
-        handleLogin={handleLogin}
-        isLoggingIn={isLoggingIn}
-        showBiometric={showBioOnLock}
-        onBiometric={tryBiometric}
-        lang={lang}
-        onChangeLang={changeLang}
-        t={t}
-      />
+      <>
+        <LockScreen
+          usernameInput={usernameInput}
+          setUsernameInput={setUsernameInput}
+          passwordInput={passwordInput}
+          setPasswordInput={setPasswordInput}
+          loginError={loginError}
+          loginErrorMsg={loginErrorMsg}
+          handleLogin={handleLogin}
+          isLoggingIn={isLoggingIn}
+          showBiometric={showBioOnLock}
+          onBiometric={tryBiometric}
+          lang={lang}
+          onChangeLang={changeLang}
+          t={t}
+        />
+        {softUpdateOverlay}
+      </>
     );
   }
 
@@ -7828,6 +8072,7 @@ function AppInner() {
           </KeyboardAvoidingView>
         </Modal>
       </SafeAreaView>
+      {softUpdateOverlay}
     </LinearGradient>
   );
 }
@@ -7917,6 +8162,73 @@ const styles = StyleSheet.create({
     color: '#475569',
     fontSize: 11,
     marginTop: 16,
+    textAlign: 'center',
+  },
+  softUpdateOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  softUpdateCard: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#0b1220',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    paddingHorizontal: 22,
+    paddingVertical: 26,
+    alignItems: 'center',
+  },
+  softUpdateTitle: {
+    color: '#f8fafc',
+    fontSize: 20,
+    fontWeight: '700',
+    marginTop: 14,
+    textAlign: 'center',
+  },
+  softUpdateBody: {
+    color: '#94a3b8',
+    fontSize: 14,
+    lineHeight: 21,
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  softUpdateMeta: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 14,
+    textAlign: 'center',
+  },
+  softUpdatePrimaryBtn: {
+    marginTop: 20,
+    alignSelf: 'stretch',
+    backgroundColor: '#38bdf8',
+    paddingVertical: 13,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  softUpdatePrimaryText: {
+    color: '#041016',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  softUpdateLaterBtn: {
+    marginTop: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  softUpdateLaterText: {
+    color: '#94a3b8',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  softUpdateHint: {
+    color: '#475569',
+    fontSize: 10,
+    marginTop: 10,
     textAlign: 'center',
   },
   lockScreen: {

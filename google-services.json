@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "926730368337",
+    "project_id": "commander-pro-f00d2",
+    "storage_bucket": "commander-pro-f00d2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:926730368337:android:357e6f9e95f0bf2a41cf70",
+        "android_client_info": {
+          "package_name": "com.commanderpro.radios"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA0z4jxPp1A2ZU94e5cJBB6JMGHteoayGw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
