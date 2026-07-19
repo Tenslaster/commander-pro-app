@@ -120,7 +120,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.2.1';
+  '1.3.0';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 
@@ -653,8 +653,8 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
     (parsed && typeof parsed === 'object' && parsed.code === 'FORCE_UPDATE')
   ) {
     const err = new Error(
-      (parsed && (parsed.message_fr || parsed.message_en || parsed.error)) ||
-        'Mise à jour requise'
+      (parsed && (parsed.error || parsed.message_en || parsed.message_fr)) ||
+        'Update required'
     );
     err.code = 'FORCE_UPDATE';
     err.status = response.status;
@@ -1802,7 +1802,30 @@ function AppInner() {
 
   // --- SESSION ---
 
+  const pushOkRef = useRef(false);
+  const pushTimersRef = useRef([]);
+  const loginInflightRef = useRef(false);
+  const bootedRef = useRef(false);
+  const langRef = useRef(lang);
+  langRef.current = lang;
+
+  const clearPushTimers = useCallback(() => {
+    pushTimersRef.current.forEach((id) => {
+      try {
+        clearTimeout(id);
+      } catch {
+        /* ignore */
+      }
+    });
+    pushTimersRef.current = [];
+  }, []);
+
   const handleLogout = useCallback(async () => {
+    // Kill deferred push registration immediately
+    clearPushTimers();
+    authTokenRef.current = null;
+    pushOkRef.current = false;
+    loginInflightRef.current = false;
     try {
       await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
       await SecureStore.deleteItemAsync(SESSION_ROLE_KEY);
@@ -1890,9 +1913,7 @@ function AppInner() {
     pendingSessionRef.current = null;
     prevStatusRef.current = {};
     prevStatusReadyRef.current = false;
-  }, []);
-
-  const pushOkRef = useRef(false);
+  }, [clearPushTimers]);
 
   /**
    * Register device for remote push (APK/IPA only).
@@ -1900,6 +1921,9 @@ function AppInner() {
    */
   const registerForPushNotificationsAsync = useCallback(async (validToken) => {
     if (!validToken) return false;
+    // Abort if session already changed/logged out
+    if (authTokenRef.current && authTokenRef.current !== validToken) return false;
+    if (!mountedRef.current) return false;
 
     // Expo Go: no remote push registration
     if (IS_EXPO_GO) {
@@ -1933,8 +1957,9 @@ function AppInner() {
       }
       if (finalStatus !== 'granted') {
         if (mountedRef.current) {
+          const en = langRef.current === 'en';
           showBanner(
-            lang === 'en'
+            en
               ? 'Notifications blocked — enable them in Settings'
               : 'Notifications refusées — active-les dans Réglages',
             'warn'
@@ -1960,8 +1985,9 @@ function AppInner() {
       } catch (tokErr) {
         console.warn('getExpoPushTokenAsync failed:', tokErr?.message || tokErr);
         if (mountedRef.current) {
+          const en = langRef.current === 'en';
           showBanner(
-            lang === 'en'
+            en
               ? 'Push token failed (check APNs/FCM credentials)'
               : 'Échec token push (APNs/FCM manquant ?)',
             'warn'
@@ -1970,6 +1996,7 @@ function AppInner() {
         return false;
       }
       if (!expoToken) return false;
+      if (authTokenRef.current !== validToken) return false;
 
       const reg = await apiFetch('/register_token', {
         method: 'POST',
@@ -1985,9 +2012,9 @@ function AppInner() {
         timeoutMs: 15000,
       });
 
-      pushOkRef.current = reg?.status === 'ok';
-      if (pushOkRef.current && mountedRef.current) {
-        // Quiet success — only log once per session in action log style
+      // Treat any non-error response as success (status ok or missing)
+      pushOkRef.current = !reg || reg.status === 'ok' || reg.status === undefined;
+      if (pushOkRef.current) {
         console.log('Push registered', Platform.OS, expoToken.slice(0, 28));
       }
       return pushOkRef.current;
@@ -1999,7 +2026,7 @@ function AppInner() {
       console.warn('Failed to register push token:', error?.message || error);
       return false;
     }
-  }, [handleLogout, lang, showBanner]);
+  }, [handleLogout, showBanner]);
 
   /**
    * OS notification on this device (works without remote APNs when app is open).
@@ -2062,19 +2089,31 @@ function AppInner() {
       setBiometricGate(false);
       pendingSessionRef.current = null;
       prevStatusReadyRef.current = false;
-      pushOkRef.current = false;
-      if (registerPush) {
-        // Slight delay so session is ready; retry once if first attempt fails
-        setTimeout(() => {
+      // Keep pushOk if re-unlocking same session; only reset when new token
+      if (authTokenRef.current !== token) {
+        pushOkRef.current = false;
+      }
+      authTokenRef.current = token;
+      if (registerPush && !IS_EXPO_GO) {
+        clearPushTimers();
+        // Delay so UI settles; cancel on logout via pushTimersRef
+        const t1 = setTimeout(() => {
+          if (authTokenRef.current !== token || !mountedRef.current) return;
           registerForPushNotificationsAsync(token).then((ok) => {
-            if (!ok && token) {
-              setTimeout(() => registerForPushNotificationsAsync(token), 4000);
+            if (!ok && authTokenRef.current === token && mountedRef.current) {
+              const t2 = setTimeout(() => {
+                if (authTokenRef.current === token) {
+                  registerForPushNotificationsAsync(token);
+                }
+              }, 4000);
+              pushTimersRef.current.push(t2);
             }
           });
         }, 600);
+        pushTimersRef.current.push(t1);
       }
     },
-    [registerForPushNotificationsAsync]
+    [registerForPushNotificationsAsync, clearPushTimers]
   );
 
   const changeLang = useCallback(async (next) => {
@@ -2136,6 +2175,8 @@ function AppInner() {
 
   useEffect(() => {
     async function boot() {
+      if (bootedRef.current) return;
+      bootedRef.current = true;
       try {
         // 1) Version gate vs API (must run even if offline → skip, not force)
         try {
@@ -2205,7 +2246,10 @@ function AppInner() {
         setNotifyLastReadTs(readTs);
 
         if (storedToken && storedRole) {
-          if (hw && enrolled && bioOn) {
+          // Don't re-lock if already unlocked (boot must not re-run, but guard anyway)
+          if (authTokenRef.current) {
+            /* already in session */
+          } else if (hw && enrolled && bioOn) {
             pendingSessionRef.current = {
               token: storedToken,
               role: storedRole,
@@ -2259,13 +2303,14 @@ function AppInner() {
       setLoginErrorMsg(t('login.errorEmpty') || 'Entrez le mot de passe');
       return;
     }
-    if (isLoggingIn) return;
+    if (isLoggingIn || loginInflightRef.current) return;
 
     if (!API_URL) {
       Alert.alert(t('err.config') || 'Configuration', 'API_URL manquant (EXPO_PUBLIC_API_URL).');
       return;
     }
 
+    loginInflightRef.current = true;
     setIsLoggingIn(true);
     try {
       const data = await apiFetch('/login', {
@@ -2281,20 +2326,8 @@ function AppInner() {
       }
 
       if (!mountedRef.current) return;
-      unlockWithSession(data.token, data.role, {
-        username: data.username || uname || data.role,
-        level: data.level,
-        permissions: data.permissions,
-        isMaster: !!data.is_master,
-      });
-      setPasswordInput('');
-      setUsernameInput('');
-      setLoginError(false);
-      setLoginErrorMsg('');
-      pushActionLog(
-        `Connexion ${data.username || data.role} · ${data.role} · ${data.level || 'master'}`
-      );
 
+      // Persist session BEFORE unlock so crash mid-login keeps credentials
       try {
         await SecureStore.setItemAsync(SESSION_TOKEN_KEY, data.token, SECURE_OPTS);
         await SecureStore.setItemAsync(SESSION_ROLE_KEY, data.role, SECURE_OPTS);
@@ -2321,6 +2354,20 @@ function AppInner() {
       } catch (storeErr) {
         console.warn('SecureStore session save failed', storeErr);
       }
+
+      unlockWithSession(data.token, data.role, {
+        username: data.username || uname || data.role,
+        level: data.level,
+        permissions: data.permissions,
+        isMaster: !!data.is_master,
+      });
+      setPasswordInput('');
+      setUsernameInput('');
+      setLoginError(false);
+      setLoginErrorMsg('');
+      pushActionLog(
+        `Login ${data.username || data.role} · ${data.role} · ${data.level || 'master'}`
+      );
     } catch (error) {
       warnVibrate();
       if (!mountedRef.current) return;
@@ -2346,6 +2393,7 @@ function AppInner() {
         setLoginErrorMsg(error.message || t('login.error'));
       }
     } finally {
+      loginInflightRef.current = false;
       if (mountedRef.current) setIsLoggingIn(false);
     }
   }, [
@@ -2461,7 +2509,7 @@ function AppInner() {
         if (error.code === 'UNAUTHORIZED') {
           // Only prompt when user is actually looking at the app
           if (appStateRef.current === 'active') {
-            Alert.alert('Sécurité', 'Votre session a expiré.');
+            Alert.alert(t('security.expired') || 'Session', t('security.expired'));
           }
           handleLogout();
           return;
@@ -2481,7 +2529,7 @@ function AppInner() {
         if (isManualRefresh && mountedRef.current) setRefreshing(false);
       }
     },
-    [handleLogout, showBanner, applyForceUpdatePolicy]
+    [handleLogout, showBanner, applyForceUpdatePolicy, t]
   );
 
   const fetchAdmin = useCallback(async () => {
@@ -2576,20 +2624,25 @@ function AppInner() {
           if (fresh.length === 1) {
             showBanner(fresh[0].title || 'Nouvelle notification', 'warn');
             lightVibrate();
-            // Local OS banner (APK/IPA + Expo Go) so tests work even without APNs/FCM
-            presentLocalOsNotification(
-              fresh[0].title || 'Commander PRO',
-              fresh[0].body || fresh[0].title || '',
-              { kind: fresh[0].type || 'alert', id: fresh[0].id }
-            );
+            // Expo Go only: local OS banners. Standalone uses remote push (+ in-app banner).
+            // If push never registered, still show local so admin test is visible.
+            if (IS_EXPO_GO || !pushOkRef.current) {
+              presentLocalOsNotification(
+                fresh[0].title || 'Commander PRO',
+                fresh[0].body || fresh[0].title || '',
+                { kind: fresh[0].type || 'alert', id: fresh[0].id }
+              );
+            }
           } else if (fresh.length > 1) {
             showBanner(`${fresh.length} nouvelles notifications`, 'warn');
             lightVibrate();
-            presentLocalOsNotification(
-              'Commander PRO',
-              `${fresh.length} nouvelles notifications`,
-              { kind: 'alert_batch', count: fresh.length }
-            );
+            if (IS_EXPO_GO || !pushOkRef.current) {
+              presentLocalOsNotification(
+                'Commander PRO',
+                `${fresh.length} nouvelles notifications`,
+                { kind: 'alert_batch', count: fresh.length }
+              );
+            }
           }
         }
         knownNotifyIdsRef.current = new Set(items.map((it) => it.id).filter(Boolean));
@@ -4488,12 +4541,22 @@ function AppInner() {
           fetchNotifications({ silent: true });
           fetchChatChannels();
           if (userRoleRef.current === 'OWNER') fetchAdmin();
+          // Re-try push registration if previous attempt failed
+          if (!IS_EXPO_GO && !pushOkRef.current) {
+            registerForPushNotificationsAsync(authTokenRef.current);
+          }
         }
       }
     };
     const sub = AppState.addEventListener('change', onChange);
     return () => sub.remove();
-  }, [fetchStatus, fetchNotifications, fetchChatChannels, fetchAdmin]);
+  }, [
+    fetchStatus,
+    fetchNotifications,
+    fetchChatChannels,
+    fetchAdmin,
+    registerForPushNotificationsAsync,
+  ]);
 
   // Lift chat composer by real keyboard height (works with Android edge-to-edge)
   useEffect(() => {

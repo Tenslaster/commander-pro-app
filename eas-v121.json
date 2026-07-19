@@ -1,0 +1,47 @@
+﻿{
+  "id": "ba5463f8-cce2-48f2-9097-f3d1c1668fe9",
+  "status": "FINISHED",
+  "platform": "ANDROID",
+  "artifacts": {
+    "buildUrl": "https://expo.dev/artifacts/eas/4Chh34Rsx2dnLCP8bJIA5QeODS66bBDXSaONysymyqU.apk",
+    "applicationArchiveUrl": "https://expo.dev/artifacts/eas/4Chh34Rsx2dnLCP8bJIA5QeODS66bBDXSaONysymyqU.apk"
+  },
+  "fingerprint": {
+    "id": "019f784f-9eed-727c-9d38-2aa50b9155f5",
+    "hash": "d4cd59da264e78eb7a3bf1b74e2ff7aadc9e7b04"
+  },
+  "initiatingActor": {
+    "id": "970e2bfa-e515-4f7b-b5f8-0404bdd8c93a",
+    "displayName": "tenslaster"
+  },
+  "logFiles": [
+    "https://storage.googleapis.com/eas-workflows-production/logs/ad3981e1-443b-40ec-9a35-83052e532a16/ba5463f8-cce2-48f2-9097-f3d1c1668fe9/2026-07-19T02%3A58%3A34Z-5e8c2364-f5df-4459-a4f8-4c60a2b9b800.txt?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=www-production%40exponentjs.iam.gserviceaccount.com%2F20260719%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260719T030430Z&X-Goog-Expires=900&X-Goog-SignedHeaders=host&X-Goog-Signature=ac005d07159a91f7c9e42e31ddbcd91cbb9d260af853151f9965cefc0869ee4877eeb4c8193a91175042df25a7775a1c20919eaa6654e0c258019fdfcf426254f98f49a32328e3f40e074c4f22d17f313ad9e154ee883ab8f54ad251a168ded19b480b3f3a731d7b58592eda2c1f8d30aafa7b2fe9e16eb5212bfea811fadb505a087c7009e1723e0b2f515062116551930bdf534ac21c1e1d043ac2d92f879bb9039742c2b6d270e816b4b35734971b5d0f407604ca9c6aaf19529feb97f6e90006de732284c40dd2961c43bc0a621594d4eaa014854394176bb139a765cd648f9191ab8a11a8de5ebeb671c898ada114ea69569e3351ef30febb523debc931"
+  ],
+  "project": {
+    "id": "ad3981e1-443b-40ec-9a35-83052e532a16",
+    "name": "iphone-batch-manager",
+    "slug": "iphone-batch-manager",
+    "ownerAccount": {
+      "id": "f71c114c-89eb-4d48-bb96-a3f6d76dae01",
+      "name": "tenslaster"
+    }
+  },
+  "distribution": "INTERNAL",
+  "buildProfile": "apk",
+  "sdkVersion": "54.0.0",
+  "appVersion": "1.2.1",
+  "appBuildVersion": "1",
+  "gitCommitHash": "be3790298341de1e2d521591ceb200b11f127ad2",
+  "gitCommitMessage": "fix: push registration retry, multi-device tokens, local OS notif fallback, test_push diagnostics",
+  "priority": "NORMAL",
+  "createdAt": "2026-07-19T02:58:31.753Z",
+  "updatedAt": "2026-07-19T03:03:59.569Z",
+  "completedAt": "2026-07-19T03:03:59.397Z",
+  "expirationDate": "2026-08-02T02:58:31.779Z",
+  "isForIosSimulator": false,
+  "metrics": {
+    "buildWaitTime": 2335,
+    "buildQueueTime": 4496,
+    "buildDuration": 320813
+  }
+}

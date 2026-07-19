@@ -1,0 +1,47 @@
+﻿{
+  "id": "9d6eb47f-5b9f-4dec-a991-f4b5da102017",
+  "status": "FINISHED",
+  "platform": "ANDROID",
+  "artifacts": {
+    "buildUrl": "https://expo.dev/artifacts/eas/jbGXHNgXGwmRw6SYIoulOyrouuyorf2qSyP-Rzv9cRI.apk",
+    "applicationArchiveUrl": "https://expo.dev/artifacts/eas/jbGXHNgXGwmRw6SYIoulOyrouuyorf2qSyP-Rzv9cRI.apk"
+  },
+  "fingerprint": {
+    "id": "019f783c-173b-7845-aa26-9594231b2bc4",
+    "hash": "88bd2516913d11e8161d6f9ca427f5521185f73f"
+  },
+  "initiatingActor": {
+    "id": "970e2bfa-e515-4f7b-b5f8-0404bdd8c93a",
+    "displayName": "tenslaster"
+  },
+  "logFiles": [
+    "https://storage.googleapis.com/eas-workflows-production/logs/ad3981e1-443b-40ec-9a35-83052e532a16/9d6eb47f-5b9f-4dec-a991-f4b5da102017/2026-07-19T02%3A37%3A14Z-c9e3f5de-05f8-47bf-bd79-6b8bb4896820.txt?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=www-production%40exponentjs.iam.gserviceaccount.com%2F20260719%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260719T024313Z&X-Goog-Expires=900&X-Goog-SignedHeaders=host&X-Goog-Signature=78276a3f46315479eb3bc6c829eb587746038d4f6d66245beded692dc8e43a241532fcb23dbf68b14887f9e75d2fc661c7af6dd3910f3f5591fd889ee0d419eddbc16c43b776f6819ddb28f323ca42959b62d6203ae670a5e4051a4ff1cc687749f92e0d9aaec7024c0c5066a52cdd2620eede740de6e39a65f5336bd3d01deea78859ebba7c99b226e2b0e7779694ff4fde98b98ad4d9d15451c10324663aaad2a92668a8d9e8e4e49e5edb4825020557acf2ebb0c7a4d663b68b88e42db8905f730641a3c2328d701329fefcba5becdcc0ce93de4f05f01fba76e86c88d0553c1a8e035b20d222d79c7adbbaf2079f70c40e9ff037ed7c2a29b318a5b9ea33"
+  ],
+  "project": {
+    "id": "ad3981e1-443b-40ec-9a35-83052e532a16",
+    "name": "iphone-batch-manager",
+    "slug": "iphone-batch-manager",
+    "ownerAccount": {
+      "id": "f71c114c-89eb-4d48-bb96-a3f6d76dae01",
+      "name": "tenslaster"
+    }
+  },
+  "distribution": "INTERNAL",
+  "buildProfile": "apk",
+  "sdkVersion": "54.0.0",
+  "appVersion": "1.2.0",
+  "appBuildVersion": "1",
+  "gitCommitHash": "fc97e956035c8ed9d49fbb7b3f80af10398a378c",
+  "gitCommitMessage": "feat: v1.2.0 dual notifications (Expo Go vs standalone) + version on downloads page",
+  "priority": "NORMAL",
+  "createdAt": "2026-07-19T02:37:11.822Z",
+  "updatedAt": "2026-07-19T02:42:30.502Z",
+  "completedAt": "2026-07-19T02:42:30.332Z",
+  "expirationDate": "2026-08-02T02:37:11.854Z",
+  "isForIosSimulator": false,
+  "metrics": {
+    "buildWaitTime": 2245,
+    "buildQueueTime": 4607,
+    "buildDuration": 311658
+  }
+}
