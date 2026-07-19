@@ -49,7 +49,8 @@ def _app_version() -> str:
     if env:
         return env
     try:
-        data = json.loads(APP_JSON.read_text(encoding="utf-8"))
+        raw = APP_JSON.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
         v = (data.get("expo") or {}).get("version") or data.get("version")
         if v:
             return str(v).strip()

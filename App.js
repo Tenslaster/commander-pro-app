@@ -120,7 +120,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.0';
+  '1.3.1';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 
@@ -1802,7 +1802,11 @@ function AppInner() {
 
   // --- SESSION ---
 
+  /** True when Expo remote push token is registered */
   const pushOkRef = useRef(false);
+  /** True when device is known to server (remote OR local-feed) */
+  const deviceRegisteredRef = useRef(false);
+  const pushWarnOnceRef = useRef(false);
   const pushTimersRef = useRef([]);
   const loginInflightRef = useRef(false);
   const bootedRef = useRef(false);
@@ -1820,11 +1824,25 @@ function AppInner() {
     pushTimersRef.current = [];
   }, []);
 
+  const getOrCreateInstallId = useCallback(async () => {
+    const key = 'commander_install_id';
+    try {
+      let id = await SecureStore.getItemAsync(key);
+      if (id && id.length >= 8) return id;
+      id = `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      await SecureStore.setItemAsync(key, id, SECURE_OPTS);
+      return id;
+    } catch {
+      return `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  }, []);
+
   const handleLogout = useCallback(async () => {
     // Kill deferred push registration immediately
     clearPushTimers();
     authTokenRef.current = null;
     pushOkRef.current = false;
+    deviceRegisteredRef.current = false;
     loginInflightRef.current = false;
     try {
       await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
@@ -1916,29 +1934,53 @@ function AppInner() {
   }, [clearPushTimers]);
 
   /**
-   * Register device for remote push (APK/IPA only).
-   * Expo Go never registers remote tokens (would show as Expo Go).
+   * Register this APK/IPA with the API.
+   * 1) Prefer Expo remote push (needs FCM Android / APNs iOS on Expo project)
+   * 2) If Expo token fails → still register as LocalDevice so admin "Devices" > 0
+   *    and feed-based local OS notifications work while the app is open.
    */
   const registerForPushNotificationsAsync = useCallback(async (validToken) => {
     if (!validToken) return false;
-    // Abort if session already changed/logged out
     if (authTokenRef.current && authTokenRef.current !== validToken) return false;
     if (!mountedRef.current) return false;
 
-    // Expo Go: no remote push registration
+    // Expo Go: never register remote (shows as Expo Go). Local feed only.
     if (IS_EXPO_GO) {
       pushOkRef.current = false;
+      deviceRegisteredRef.current = false;
       return false;
     }
+
+    const en = langRef.current === 'en';
+
+    const registerOnServer = async (pushToken, client) => {
+      if (authTokenRef.current !== validToken) return false;
+      const reg = await apiFetch('/register_token', {
+        method: 'POST',
+        token: validToken,
+        body: {
+          token: pushToken,
+          client,
+          platform: Platform.OS,
+          app_version: APP_VERSION,
+          channel_id: NOTIF_CHANNEL_MAIN,
+          replace_expo_go: true,
+        },
+        timeoutMs: 15000,
+      });
+      const ok = !reg || reg.status === 'ok' || reg.status === undefined;
+      if (ok) {
+        deviceRegisteredRef.current = true;
+        pushOkRef.current = client === 'standalone';
+        console.log('Device registered', client, Platform.OS, String(pushToken).slice(0, 36));
+      }
+      return ok;
+    };
 
     try {
       await setupAndroidNotificationChannels();
 
-      if (!Device.isDevice) {
-        console.warn('Push: not a physical device');
-        return false;
-      }
-
+      // Always request notification permission (needed for local + remote)
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
       if (existingStatus !== 'granted') {
@@ -1947,25 +1989,21 @@ function AppInner() {
             allowAlert: true,
             allowBadge: true,
             allowSound: true,
-            allowDisplayInCarPlay: false,
-            allowCriticalAlerts: false,
-            provideAppNotificationSettings: false,
-            allowProvisional: false,
           },
         });
         finalStatus = status;
       }
       if (finalStatus !== 'granted') {
-        if (mountedRef.current) {
-          const en = langRef.current === 'en';
+        if (mountedRef.current && !pushWarnOnceRef.current) {
+          pushWarnOnceRef.current = true;
           showBanner(
             en
-              ? 'Notifications blocked — enable them in Settings'
-              : 'Notifications refusées — active-les dans Réglages',
+              ? 'Enable Notifications in iOS/Android Settings for this app'
+              : 'Active les Notifications dans Réglages pour cette app',
             'warn'
           );
         }
-        return false;
+        // Still register as local so server sees the device
       }
 
       const projectId =
@@ -1973,60 +2011,57 @@ function AppInner() {
         Constants.easConfig?.projectId ??
         'ad3981e1-443b-40ec-9a35-83052e532a16';
 
-      if (!projectId) {
-        console.warn('EAS Project ID missing — cannot register push.');
-        return false;
+      // --- Try Expo remote token (real push when FCM/APNs configured) ---
+      let expoToken = null;
+      let expoErrMsg = '';
+      if (Device.isDevice && projectId && finalStatus === 'granted') {
+        try {
+          const tok = await Notifications.getExpoPushTokenAsync({ projectId });
+          expoToken = tok?.data || null;
+        } catch (tokErr) {
+          expoErrMsg = String(tokErr?.message || tokErr || '');
+          console.warn('getExpoPushTokenAsync failed:', expoErrMsg);
+        }
       }
 
-      let expoToken;
-      try {
-        const tok = await Notifications.getExpoPushTokenAsync({ projectId });
-        expoToken = tok?.data;
-      } catch (tokErr) {
-        console.warn('getExpoPushTokenAsync failed:', tokErr?.message || tokErr);
-        if (mountedRef.current) {
-          const en = langRef.current === 'en';
+      if (expoToken && String(expoToken).startsWith('ExponentPushToken')) {
+        const ok = await registerOnServer(expoToken, 'standalone');
+        if (ok) return true;
+      }
+
+      // --- Fallback: local-feed device (no FCM/APNs required) ---
+      const installId = await getOrCreateInstallId();
+      const localToken = `LocalDevice[${installId}]`;
+      const okLocal = await registerOnServer(localToken, 'standalone-local');
+      if (okLocal) {
+        // One soft info banner, not every launch spam
+        if (mountedRef.current && expoErrMsg && !pushWarnOnceRef.current) {
+          pushWarnOnceRef.current = true;
           showBanner(
             en
-              ? 'Push token failed (check APNs/FCM credentials)'
-              : 'Échec token push (APNs/FCM manquant ?)',
-            'warn'
+              ? 'Alerts: local mode (open app to see them). Remote needs FCM/APNs.'
+              : 'Alertes: mode local (garde l’app ouverte). Push distant = FCM/APNs.',
+            'info'
           );
         }
-        return false;
+        return true;
       }
-      if (!expoToken) return false;
-      if (authTokenRef.current !== validToken) return false;
-
-      const reg = await apiFetch('/register_token', {
-        method: 'POST',
-        token: validToken,
-        body: {
-          token: expoToken,
-          client: 'standalone',
-          platform: Platform.OS,
-          app_version: APP_VERSION,
-          channel_id: NOTIF_CHANNEL_MAIN,
-          replace_expo_go: true,
-        },
-        timeoutMs: 15000,
-      });
-
-      // Treat any non-error response as success (status ok or missing)
-      pushOkRef.current = !reg || reg.status === 'ok' || reg.status === undefined;
-      if (pushOkRef.current) {
-        console.log('Push registered', Platform.OS, expoToken.slice(0, 28));
-      }
-      return pushOkRef.current;
+      return false;
     } catch (error) {
       if (error.code === 'UNAUTHORIZED') {
         handleLogout();
         return false;
       }
-      console.warn('Failed to register push token:', error?.message || error);
-      return false;
+      console.warn('Failed to register device:', error?.message || error);
+      // Last-ditch local register
+      try {
+        const installId = await getOrCreateInstallId();
+        return await registerOnServer(`LocalDevice[${installId}]`, 'standalone-local');
+      } catch {
+        return false;
+      }
     }
-  }, [handleLogout, showBanner]);
+  }, [handleLogout, showBanner, getOrCreateInstallId]);
 
   /**
    * OS notification on this device (works without remote APNs when app is open).
@@ -2624,9 +2659,15 @@ function AppInner() {
           if (fresh.length === 1) {
             showBanner(fresh[0].title || 'Nouvelle notification', 'warn');
             lightVibrate();
-            // Expo Go only: local OS banners. Standalone uses remote push (+ in-app banner).
-            // If push never registered, still show local so admin test is visible.
-            if (IS_EXPO_GO || !pushOkRef.current) {
+            // Local OS banner when: Expo Go, or no remote Expo token (local-feed mode).
+            // Always show for test_push so admin tests work without FCM/APNs.
+            const forceLocal =
+              IS_EXPO_GO ||
+              !pushOkRef.current ||
+              fresh[0].type === 'admin' ||
+              (fresh[0].title || '').includes('Test push') ||
+              (fresh[0].title || '').includes('🔔');
+            if (forceLocal) {
               presentLocalOsNotification(
                 fresh[0].title || 'Commander PRO',
                 fresh[0].body || fresh[0].title || '',
@@ -6918,12 +6959,17 @@ function AppInner() {
                         body: 'Si tu vois ça, les notifs marchent.',
                       });
                       if (data) {
+                        // Refresh feed so local OS banner can fire immediately
+                        fetchNotifications({ silent: true });
                         Alert.alert(
                           'Test push',
                           [
-                            `Expo delivery: ${data.sent ?? 0}`,
-                            `Devices: ${data.devices ?? 0}`,
+                            `Expo remote: ${data.sent ?? 0}`,
+                            `Devices: ${data.devices ?? 0} (remote ${data.devices_remote ?? 0} · local ${data.devices_local ?? 0})`,
                             data.hint || '',
+                            data.devices_local > 0
+                              ? 'Mode local: regarde le bandeau / notif si l’app est ouverte.'
+                              : '',
                           ]
                             .filter(Boolean)
                             .join('\n')
@@ -6943,11 +6989,12 @@ function AppInner() {
                         body: 'Test admin → tous les appareils.',
                       });
                       if (data) {
+                        fetchNotifications({ silent: true });
                         Alert.alert(
                           'Test push',
                           [
-                            `Expo delivery: ${data.sent ?? 0}`,
-                            `Devices: ${data.devices ?? 0}`,
+                            `Expo remote: ${data.sent ?? 0}`,
+                            `Devices: ${data.devices ?? 0} (remote ${data.devices_remote ?? 0} · local ${data.devices_local ?? 0})`,
                             data.hint || '',
                           ]
                             .filter(Boolean)

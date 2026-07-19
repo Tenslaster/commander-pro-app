@@ -1,76 +1,76 @@
-﻿{
-    "expo":  {
-                 "name":  "Commander PRO",
-                 "slug":  "iphone-batch-manager",
-                 "version":  "1.3.0",
-                 "orientation":  "portrait",
-                 "icon":  "./assets/icon.png",
-                 "userInterfaceStyle":  "dark",
-                 "splash":  {
-                                "image":  "./assets/splash-icon.png",
-                                "resizeMode":  "contain",
-                                "backgroundColor":  "#000000"
-                            },
-                 "ios":  {
-                             "supportsTablet":  true,
-                             "bundleIdentifier":  "com.commanderpro.radios",
-                             "icon":  "./assets/icon.png",
-                             "infoPlist":  {
-                                               "ITSAppUsesNonExemptEncryption":  false,
-                                               "NSFaceIDUsageDescription":  "Unlock Commander PRO with Face ID.",
-                                               "NSPhotoLibraryUsageDescription":  "Send photos in Commander PRO chat.",
-                                               "NSCameraUsageDescription":  "Take a photo for Commander PRO chat.",
-                                               "UIBackgroundModes":  [
-                                                                         "remote-notification"
-                                                                     ]
-                                           }
-                         },
-                 "android":  {
-                                 "package":  "com.commanderpro.radios",
-                                 "adaptiveIcon":  {
-                                                      "backgroundColor":  "#000000",
-                                                      "foregroundImage":  "./assets/android-icon-foreground.png",
-                                                      "backgroundImage":  "./assets/android-icon-background.png",
-                                                      "monochromeImage":  "./assets/android-icon-monochrome.png"
-                                                  },
-                                 "icon":  "./assets/icon.png",
-                                 "softwareKeyboardLayoutMode":  "pan",
-                                 "permissions":  [
-                                                     "android.permission.VIBRATE",
-                                                     "android.permission.USE_BIOMETRIC",
-                                                     "android.permission.USE_FINGERPRINT",
-                                                     "android.permission.POST_NOTIFICATIONS",
-                                                     "android.permission.CAMERA",
-                                                     "android.permission.READ_MEDIA_IMAGES",
-                                                     "android.permission.READ_EXTERNAL_STORAGE"
-                                                 ],
-                                 "edgeToEdgeEnabled":  true
-                             },
-                 "web":  {
-                             "favicon":  "./assets/favicon.png"
-                         },
-                 "extra":  {
-                               "eas":  {
-                                           "projectId":  "ad3981e1-443b-40ec-9a35-83052e532a16"
-                                       }
-                           },
-                 "plugins":  [
-                                 "expo-secure-store",
-                                 [
-                                     "expo-image-picker",
-                                     {
-                                         "photosPermission":  "Allow Commander PRO to access your photos for chat.",
-                                         "cameraPermission":  "Allow Commander PRO to use the camera for chat."
-                                     }
-                                 ],
-                                 [
-                                     "expo-notifications",
-                                     {
-                                         "icon":  "./assets/notification-icon.png",
-                                         "color":  "#f97316",
-                                         "defaultChannel":  "commander-pro"
-                                     }
-                                 ]
-                             ]
-             }
+{
+  "expo": {
+    "name": "Commander PRO",
+    "slug": "iphone-batch-manager",
+    "version": "1.3.1",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.commanderpro.radios",
+      "icon": "./assets/icon.png",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSFaceIDUsageDescription": "Unlock Commander PRO with Face ID.",
+        "NSPhotoLibraryUsageDescription": "Send photos in Commander PRO chat.",
+        "NSCameraUsageDescription": "Take a photo for Commander PRO chat.",
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.commanderpro.radios",
+      "adaptiveIcon": {
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "icon": "./assets/icon.png",
+      "softwareKeyboardLayoutMode": "pan",
+      "permissions": [
+        "android.permission.VIBRATE",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE"
+      ],
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ad3981e1-443b-40ec-9a35-83052e532a16"
+      }
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Commander PRO to access your photos for chat.",
+          "cameraPermission": "Allow Commander PRO to use the camera for chat."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#f97316",
+          "defaultChannel": "commander-pro"
+        }
+      ]
+    ]
+  }
 }
