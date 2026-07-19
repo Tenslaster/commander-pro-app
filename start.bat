@@ -11,6 +11,8 @@ color 0B
 set "CI="
 set "EXPO_NO_TELEMETRY=1"
 set "EXPO_NO_DOTENV="
+:: Fixed tunnel subdomain so Expo Go URL never rotates each launch
+set "EXPO_TUNNEL_SUBDOMAIN=commanderpro"
 set "PATH=%CD%\node_modules\.bin;%PATH%"
 
 echo ============================================================
@@ -18,15 +20,11 @@ echo  IPhoneApp / Commander PRO
 echo  Mode: TUNNEL + Expo Go  (friends outside your Wi-Fi)
 echo ============================================================
 echo.
-echo  After "Tunnel ready", look for a line with:
-echo     exp://....   or   a QR code
+echo  FIXED Expo Go URL (always the same):
+echo     exp://commanderpro.ngrok.io:80
 echo.
-echo  Friend: open that link ONLY in the Expo Go app.
-echo  Opening in Chrome/Safari causes:
-echo    - runtime custom / redirect middleware errors
-echo    - Must specify expo-platform header
-echo  Those lines are noise if someone used a browser — ignore them
-echo  if Expo Go already loaded the app.
+echo  Open that link ONLY in the Expo Go app (not Chrome/Safari).
+echo  Opening in a browser causes platform header / middleware noise.
 echo ============================================================
 echo.
 
@@ -36,9 +34,19 @@ for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":8081" ^| findstr "LI
   taskkill /F /PID %%P >nul 2>&1
 )
 
-:: Wipe stale Expo cache that can force "runtime custom"
+:: Keep .expo\settings.json (fixed urlRandomness). Only drop devices list.
 if exist ".expo\devices.json" del /q ".expo\devices.json" >nul 2>&1
-if exist ".expo\settings.json" del /q ".expo\settings.json" >nul 2>&1
+if not exist ".expo" mkdir ".expo" >nul 2>&1
+> ".expo\settings.json" (
+  echo {
+  echo   "hostType": "tunnel",
+  echo   "lanType": "ip",
+  echo   "dev": true,
+  echo   "minify": false,
+  echo   "urlRandomness": "commanderpro",
+  echo   "https": false
+  echo }
+)
 
 echo Starting Metro + tunnel (Expo Go)...
 echo.

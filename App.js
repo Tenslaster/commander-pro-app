@@ -125,7 +125,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.3';
+  '1.3.4';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 
@@ -162,17 +162,18 @@ function isAppVersionBehind(clientVersion, latestVersion) {
   return compareAppVersions(clientVersion || '0.0.0', latestVersion) < 0;
 }
 
-/** Platform-aware "latest" from API policy (falls back to built-in publish targets). */
+/** Platform-aware "latest" from API policy (falls back to generic latest, then this build). */
 function resolveLatestAppVersion(policy) {
   if (!policy || typeof policy !== 'object') {
-    return Platform.OS === 'ios' ? '1.3.1' : '1.3.3';
+    return APP_VERSION;
   }
   if (Platform.OS === 'ios') {
     return (
       policy.latest_app_version_ios ||
       policy.latestAppVersionIos ||
+      policy.latest_app_version ||
       policy.min_app_version ||
-      '1.3.1'
+      APP_VERSION
     );
   }
   if (Platform.OS === 'android') {
@@ -180,7 +181,8 @@ function resolveLatestAppVersion(policy) {
       policy.latest_app_version_android ||
       policy.latestAppVersionAndroid ||
       policy.latest_app_version ||
-      '1.3.3'
+      policy.min_app_version ||
+      APP_VERSION
     );
   }
   return policy.latest_app_version || policy.min_app_version || APP_VERSION;
@@ -258,27 +260,33 @@ const APP_LEVEL_PRESETS = {
   ],
   admin: [...APP_PERM_KEYS],
 };
-const POLL_PLAYLIST_MS = 4000;
+const POLL_PLAYLIST_MS = 7000;
 const ALERTS_KEY = 'status_alerts_enabled';
 const NOTIFY_READ_TS_KEY = 'notify_last_read_ts';
 /** Old large feed cache — SecureStore max ~2048 bytes; we only delete this key now */
 const ALERTS_CACHE_KEY_LEGACY = 'alerts_feed_cache_v1';
 const CHAT_READ_PREFIX = 'chat_read_';
 
-/** Poll intervals — faster on the active tab, slower in background tabs */
-const POLL_STATUS_MS = 3000;
-const POLL_STATUS_IDLE_MS = 9000;
-const POLL_LOGS_MS = 2000;
-const POLL_ADMIN_MS = 10000;
-const POLL_NOTIFY_MS = 4000;
-const POLL_NOTIFY_IDLE_MS = 14000;
-const POLL_CHAT_MS = 2000;
-const POLL_CHAT_LIST_MS = 4000;
-const POLL_CHAT_LIST_IDLE_MS = 16000;
-const COMMAND_REFRESH_MS = 1000;
-const LOG_REFRESH_AFTER_CMD_MS = 500;
-const SEARCH_DEBOUNCE_MS = 160;
-const USERS_SEARCH_DEBOUNCE_MS = 280;
+/**
+ * Poll intervals (1.3.4): active tab stays snappy; idle tabs / battery much lighter.
+ * Status still coalesces in-flight so stacked polls never pile up.
+ */
+const POLL_STATUS_MS = 4500;
+const POLL_STATUS_IDLE_MS = 16000;
+const POLL_LOGS_MS = 3500;
+const POLL_ADMIN_MS = 18000;
+const POLL_NOTIFY_MS = 5500;
+const POLL_NOTIFY_IDLE_MS = 22000;
+const POLL_CHAT_MS = 2800;
+const POLL_CHAT_LIST_MS = 5000;
+const POLL_CHAT_LIST_IDLE_MS = 24000;
+const COMMAND_REFRESH_MS = 900;
+const LOG_REFRESH_AFTER_CMD_MS = 450;
+const SEARCH_DEBOUNCE_MS = 180;
+const USERS_SEARCH_DEBOUNCE_MS = 300;
+/** Android/iOS background feed poll while JS still alive */
+const BG_POLL_MS_ANDROID = 35000;
+const BG_POLL_MS_IOS = 60000;
 
 // --- Platform best practices (iOS Human Interface + Android Material) ---
 const IS_IOS = Platform.OS === 'ios';
@@ -577,6 +585,9 @@ const formatTime = (ts) => {
   }
 };
 
+/** In-flight GET dedupe (same path+auth) — cuts duplicate status/notify/chat storms */
+const _inflightGet = new Map();
+
 async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs } = {}) {
   if (!API_URL) {
     const err = new Error('API_URL manquant (EXPO_PUBLIC_API_URL).');
@@ -584,6 +595,32 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
     throw err;
   }
 
+  const methodU = String(method || 'GET').toUpperCase();
+  const dedupeKey =
+    methodU === 'GET' && body === undefined
+      ? `${path}\0${token || ''}`
+      : null;
+  if (dedupeKey && _inflightGet.has(dedupeKey)) {
+    return _inflightGet.get(dedupeKey);
+  }
+
+  const run = _apiFetchOnce(path, {
+    method: methodU,
+    token,
+    body,
+    signal,
+    timeoutMs,
+  });
+  if (dedupeKey) {
+    _inflightGet.set(dedupeKey, run);
+    run.finally(() => {
+      if (_inflightGet.get(dedupeKey) === run) _inflightGet.delete(dedupeKey);
+    }).catch(() => {});
+  }
+  return run;
+}
+
+async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeoutMs } = {}) {
   const headers = {
     Accept: 'application/json',
     // Cloudflare blocks some empty / bot signatures without a UA
@@ -1656,6 +1693,8 @@ function AppInner() {
   /** Soft update sheet (optional, once per user per day) */
   const [softUpdatePolicy, setSoftUpdatePolicy] = useState(null);
   const versionPolicyRef = useRef(null);
+  /** Prevent double soft-modal when username/role effects re-fire before SecureStore write */
+  const softOfferKeyRef = useRef('');
   const [biometricGate, setBiometricGate] = useState(false);
   const [biometricHardwareOk, setBiometricHardwareOk] = useState(false);
   const [biometricEnabled, setBiometricEnabled] = useState(false);
@@ -2361,8 +2400,8 @@ function AppInner() {
   const maybeOfferSoftUpdate = useCallback(async (policy, userKey) => {
     if (!policy || typeof policy !== 'object') return false;
     if (!mountedRef.current) return false;
-    // Never soft-nag when hard force is already up
-    if (forceUpdatePolicy) return false;
+    // Never soft-nag when hard force is already up or modal already open
+    if (forceUpdatePolicy || softUpdatePolicy) return false;
     const minV = policy.min_app_version || policy.minAppVersion;
     // If below min and force is on, hard path handles it
     if (
@@ -2375,15 +2414,24 @@ function AppInner() {
     const latestV = resolveLatestAppVersion(policy);
     if (!isAppVersionBehind(APP_VERSION, latestV)) return false;
 
-    const storeKey = softUpdateSeenKey(userKey, latestV);
+    const uk = userKey || 'anon';
+    const offerKey = `${uk}|${latestV}|${localDateKey()}`;
+    if (softOfferKeyRef.current === offerKey) return false;
+
+    const storeKey = softUpdateSeenKey(uk, latestV);
     try {
       const seen = await SecureStore.getItemAsync(storeKey, SECURE_OPTS);
-      if (seen === '1') return false;
+      if (seen === '1') {
+        softOfferKeyRef.current = offerKey;
+        return false;
+      }
     } catch {
       /* ignore store errors — still show once this session via state */
     }
 
     if (!mountedRef.current) return false;
+    // Lock before setState so parallel effects don't open twice
+    softOfferKeyRef.current = offerKey;
     setSoftUpdatePolicy({
       min_app_version: minV,
       latest_app_version: latestV,
@@ -2396,11 +2444,11 @@ function AppInner() {
       soft_message_en: policy.soft_message_en || '',
       message_fr: policy.message_fr || '',
       message_en: policy.message_en || '',
-      _userKey: userKey || 'anon',
+      _userKey: uk,
       _latest: latestV,
     });
     return true;
-  }, [forceUpdatePolicy]);
+  }, [forceUpdatePolicy, softUpdatePolicy]);
 
   const dismissSoftUpdate = useCallback(async () => {
     const p = softUpdatePolicy;
@@ -2692,39 +2740,46 @@ function AppInner() {
         const data = await apiFetch('/status', { token, timeoutMs: 12000 });
         if (!data || typeof data !== 'object' || Array.isArray(data) || !mountedRef.current) return;
 
-        const procArray = Object.keys(data)
-          .filter((key) => key && typeof key === 'string')
-          .map((key) => {
-            const row = data[key] && typeof data[key] === 'object' ? data[key] : {};
-            const id = String(key);
-            const isBot =
-              !!row.is_bot ||
-              /_BOT$/i.test(id) ||
-              /highrise/i.test(String(row.name || ''));
-            let status = String(row.status || 'STOPPED').toUpperCase();
-            // Normalize rare/legacy status strings so filters & colors work
-            if (status === 'ONLINE' || status === 'UP') status = 'RUNNING';
-            if (status === 'OFFLINE' || status === 'DOWN' || status === 'DEAD')
-              status = 'STOPPED';
-            if (status === 'CRASHED' || status === 'FAIL') status = 'ERROR';
-            if (!['RUNNING', 'STOPPED', 'ERROR'].includes(status)) status = 'STOPPED';
-            return {
-              id,
-              name: row.name != null && String(row.name).trim() ? String(row.name) : id,
-              status,
-              pid: row.pid ?? null,
-              auto_restart: !!row.auto_restart,
-              is_bot: isBot,
-              room_id: row.room_id || '',
-              api_key_masked: row.api_key_masked || '',
-              api_key_tail: row.api_key_tail || '',
-            };
-          })
-          // Stable order so the list doesn't jump every poll
-          .sort((a, b) => {
-            if (a.is_bot !== b.is_bot) return a.is_bot ? -1 : 1;
-            return a.id.localeCompare(b.id, undefined, { sensitivity: 'base' });
-          });
+        // 1.3.4: single-pass map + sort without intermediate filter alloc
+        const keys = Object.keys(data);
+        const procArray = new Array(keys.length);
+        let n = 0;
+        for (let i = 0; i < keys.length; i += 1) {
+          const key = keys[i];
+          if (!key || typeof key !== 'string') continue;
+          const row = data[key] && typeof data[key] === 'object' ? data[key] : {};
+          const id = String(key);
+          const isBot =
+            !!row.is_bot ||
+            /_BOT$/i.test(id) ||
+            /highrise/i.test(String(row.name || ''));
+          let status = String(row.status || 'STOPPED').toUpperCase();
+          if (status === 'ONLINE' || status === 'UP') status = 'RUNNING';
+          else if (status === 'OFFLINE' || status === 'DOWN' || status === 'DEAD')
+            status = 'STOPPED';
+          else if (status === 'CRASHED' || status === 'FAIL') status = 'ERROR';
+          if (status !== 'RUNNING' && status !== 'STOPPED' && status !== 'ERROR') {
+            status = 'STOPPED';
+          }
+          procArray[n] = {
+            id,
+            name: row.name != null && String(row.name).trim() ? String(row.name) : id,
+            status,
+            pid: row.pid ?? null,
+            auto_restart: !!row.auto_restart,
+            is_bot: isBot,
+            room_id: row.room_id || '',
+            api_key_masked: row.api_key_masked || '',
+            api_key_tail: row.api_key_tail || '',
+          };
+          n += 1;
+        }
+        procArray.length = n;
+        // Stable order so the list doesn't jump every poll
+        procArray.sort((a, b) => {
+          if (a.is_bot !== b.is_bot) return a.is_bot ? -1 : 1;
+          return a.id.localeCompare(b.id, undefined, { sensitivity: 'base' });
+        });
 
         // Skip alerts on first successful snapshot after login
         if (statusAlertsRef.current && prevStatusReadyRef.current) {
@@ -4839,7 +4894,7 @@ function AppInner() {
           pollNotifyOnceInBackground().catch(() => {});
           clearBgPoll();
           // Keep polling while OS keeps JS alive (Android ~OK; iOS often suspends quickly)
-          const intervalMs = IS_IOS ? 45000 : 25000;
+          const intervalMs = IS_IOS ? BG_POLL_MS_IOS : BG_POLL_MS_ANDROID;
           bgPollIntervalRef.current = setInterval(() => {
             if (!authTokenRef.current) return;
             pollNotifyOnceInBackground().catch(() => {});
@@ -5320,10 +5375,11 @@ function AppInner() {
 
   const listPerfProps = useMemo(
     () => ({
-      initialNumToRender: IS_ANDROID ? 10 : 12,
-      maxToRenderPerBatch: IS_ANDROID ? 5 : 6,
-      updateCellsBatchingPeriod: IS_ANDROID ? 100 : 80,
-      windowSize: IS_ANDROID ? 6 : 7,
+      // 1.3.4: smaller windows = less JS/layout per frame on mid devices
+      initialNumToRender: IS_ANDROID ? 8 : 10,
+      maxToRenderPerBatch: IS_ANDROID ? 4 : 5,
+      updateCellsBatchingPeriod: IS_ANDROID ? 120 : 90,
+      windowSize: IS_ANDROID ? 5 : 6,
       // removeClippedSubviews: blank lists on Android + some iOS tab switches
       removeClippedSubviews: false,
       ...platformListExtras,
@@ -5334,9 +5390,9 @@ function AppInner() {
   /** Heavier list (radios with cards) — keep virtualization tighter */
   const radiosListPerfProps = useMemo(
     () => ({
-      initialNumToRender: IS_ANDROID ? 6 : 8,
+      initialNumToRender: IS_ANDROID ? 5 : 7,
       maxToRenderPerBatch: IS_ANDROID ? 3 : 4,
-      updateCellsBatchingPeriod: 100,
+      updateCellsBatchingPeriod: 120,
       windowSize: IS_ANDROID ? 4 : 5,
       removeClippedSubviews: false,
       ...platformListExtras,

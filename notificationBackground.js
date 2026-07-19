@@ -23,7 +23,7 @@ const BG_LAST_TS_KEY = 'bg_notify_last_ts';
 const API_URL = (
   process.env.EXPO_PUBLIC_API_URL || 'https://crew.kingdom.forum/api'
 ).replace(/\/+$/, '');
-const APP_VERSION = '1.3.3';
+const APP_VERSION = '1.3.4';
 const CHANNEL = 'commander-pro';
 
 async function ensureAndroidChannel() {
@@ -53,17 +53,35 @@ async function fetchAndNotify() {
   const lastRaw = (await SecureStore.getItemAsync(BG_LAST_TS_KEY)) || '0';
   const lastTs = parseFloat(lastRaw) || 0;
 
-  const res = await fetch(`${API_URL}/notifications?limit=30`, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: token,
-      'X-App-Version': APP_VERSION,
-      'User-Agent': `CommanderPRO/${APP_VERSION} (BackgroundFetch; ${Platform.OS})`,
-    },
-  });
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer =
+    controller &&
+    setTimeout(() => {
+      try {
+        controller.abort();
+      } catch {
+        /* ignore */
+      }
+    }, 12000);
+  let res;
+  try {
+    res = await fetch(`${API_URL}/notifications?limit=20`, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: token,
+        'X-App-Version': APP_VERSION,
+        'User-Agent': `CommanderPRO/${APP_VERSION} (BackgroundFetch; ${Platform.OS})`,
+      },
+      signal: controller?.signal,
+    });
+  } catch {
+    return BackgroundFetch.BackgroundFetchResult.Failed;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
-  if (res.status === 401 || res.status === 426) {
+  if (!res || res.status === 401 || res.status === 426) {
     return BackgroundFetch.BackgroundFetchResult.Failed;
   }
   if (!res.ok) {
@@ -133,8 +151,8 @@ if (!TaskManager.isTaskDefined(BG_NOTIFY_TASK)) {
 export async function startBackgroundNotifyFetch() {
   try {
     await ensureAndroidChannel();
-    // Request frequent wakeups; OS decides real interval (often 15+ min)
-    const minInterval = Platform.OS === 'ios' ? 60 : 120;
+    // 1.3.4: request sensible wakeups; OS still throttles (often 15+ min)
+    const minInterval = Platform.OS === 'ios' ? 120 : 180;
     await BackgroundFetch.setMinimumIntervalAsync(minInterval);
 
     const status = await BackgroundFetch.getStatusAsync();
