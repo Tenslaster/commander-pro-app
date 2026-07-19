@@ -1,5 +1,7 @@
-import { registerRootComponent } from 'expo';
+// Background task must be defined before the app component tree loads
+import './notificationBackground';
 
+import { registerRootComponent } from 'expo';
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

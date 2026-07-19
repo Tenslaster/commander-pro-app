@@ -36,6 +36,11 @@ import * as Device from 'expo-device';
 import * as SecureStore from 'expo-secure-store';
 import * as ImagePicker from 'expo-image-picker';
 import { LANG_KEY, createT, normalizeLang } from './i18n';
+import {
+  startBackgroundNotifyFetch,
+  stopBackgroundNotifyFetch,
+  pollNotifyOnceInBackground,
+} from './notificationBackground';
 
 /**
  * Runtime client:
@@ -120,7 +125,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.1';
+  '1.3.2';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 
@@ -1844,6 +1849,7 @@ function AppInner() {
     pushOkRef.current = false;
     deviceRegisteredRef.current = false;
     loginInflightRef.current = false;
+    stopBackgroundNotifyFetch().catch(() => {});
     try {
       await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
       await SecureStore.deleteItemAsync(SESSION_ROLE_KEY);
@@ -2135,6 +2141,10 @@ function AppInner() {
         const t1 = setTimeout(() => {
           if (authTokenRef.current !== token || !mountedRef.current) return;
           registerForPushNotificationsAsync(token).then((ok) => {
+            // Android: start background poll so alerts work without FCM
+            if (IS_ANDROID && authTokenRef.current === token) {
+              startBackgroundNotifyFetch().catch(() => {});
+            }
             if (!ok && authTokenRef.current === token && mountedRef.current) {
               const t2 = setTimeout(() => {
                 if (authTokenRef.current === token) {
@@ -4570,11 +4580,20 @@ function AppInner() {
   // --- LIFECYCLE ---
 
   // Pause polls when app is backgrounded (tab out) so failed requests don't look like errors
+  // Android: while process still alive, keep a short interval poll + fire local notifs (no FCM)
+  const androidBgIntervalRef = useRef(null);
   useEffect(() => {
+    const clearAndroidBg = () => {
+      if (androidBgIntervalRef.current) {
+        clearInterval(androidBgIntervalRef.current);
+        androidBgIntervalRef.current = null;
+      }
+    };
     const onChange = (next) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
       if (prev.match(/inactive|background/) && next === 'active') {
+        clearAndroidBg();
         // Coming back: quiet refresh, reset fail counter
         netFailCountRef.current = 0;
         if (authTokenRef.current) {
@@ -4586,11 +4605,28 @@ function AppInner() {
           if (!IS_EXPO_GO && !pushOkRef.current) {
             registerForPushNotificationsAsync(authTokenRef.current);
           }
+          if (IS_ANDROID && !IS_EXPO_GO) {
+            startBackgroundNotifyFetch().catch(() => {});
+          }
+        }
+      } else if (next.match(/inactive|background/) && authTokenRef.current) {
+        // Immediate poll when leaving foreground
+        if (IS_ANDROID && !IS_EXPO_GO) {
+          pollNotifyOnceInBackground().catch(() => {});
+          clearAndroidBg();
+          // Keep polling every 25s while Android keeps the JS process alive
+          androidBgIntervalRef.current = setInterval(() => {
+            if (!authTokenRef.current) return;
+            pollNotifyOnceInBackground().catch(() => {});
+          }, 25000);
         }
       }
     };
     const sub = AppState.addEventListener('change', onChange);
-    return () => sub.remove();
+    return () => {
+      clearAndroidBg();
+      sub.remove();
+    };
   }, [
     fetchStatus,
     fetchNotifications,

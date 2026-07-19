@@ -22,6 +22,11 @@ android/
 .env.*
 !.env.example
 
+# FCM / Firebase private keys (google-services.json is OK to commit)
+credentials/
+*-firebase-adminsdk-*.json
+service-account*.json
+
 # Logs / OS
 npm-debug.*
 yarn-debug.*

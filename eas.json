@@ -29,8 +29,7 @@
       },
       "android": {
         "buildType": "apk"
-      },
-      "channel": "apk"
+      }
     },
     "ipa": {
       "distribution": "internal",
@@ -39,8 +38,7 @@
       },
       "ios": {
         "simulator": false
-      },
-      "channel": "ipa"
+      }
     },
     "production": {
       "autoIncrement": true,
