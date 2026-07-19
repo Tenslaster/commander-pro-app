@@ -272,6 +272,14 @@ const STRINGS = {
     'err.config': 'API_URL manquant (EXPO_PUBLIC_API_URL).',
     'err.forbidden': 'Action non autorisée',
     'err.generic': 'Erreur',
+
+    'update.title': 'Mise à jour requise',
+    'update.body':
+      "Cette version de l'app n'est plus supportée. Téléchargez la nouvelle version.",
+    'update.download': 'Télécharger',
+    'update.yourVersion': 'Votre version',
+    'update.required': 'Requis',
+    'update.latest': 'Dernière',
   },
 
   en: {
@@ -538,6 +546,14 @@ const STRINGS = {
     'err.config': 'Missing API_URL (EXPO_PUBLIC_API_URL).',
     'err.forbidden': 'Action not allowed',
     'err.generic': 'Error',
+
+    'update.title': 'Update required',
+    'update.body':
+      'This app version is no longer supported. Please download the new build.',
+    'update.download': 'Download',
+    'update.yourVersion': 'Your version',
+    'update.required': 'Required',
+    'update.latest': 'Latest',
   },
 };
 

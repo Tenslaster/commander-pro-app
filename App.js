@@ -24,6 +24,7 @@ import {
   Pressable,
   AppState,
   Keyboard,
+  Linking,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -77,6 +78,42 @@ const DEFAULT_API_URL = 'https://crew.kingdom.forum/api';
 const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
 /** Base host without trailing /api — used for /api/chat/media/... images */
 const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
+
+/** App store / build version — must stay >= API min_app_version (see app_version_policy.json) */
+const APP_VERSION =
+  Constants.expoConfig?.version ||
+  Constants.nativeAppVersion ||
+  Constants.manifest?.version ||
+  '1.1.0';
+const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
+const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
+
+/** Compare semver-ish strings: returns -1 / 0 / 1 */
+function compareAppVersions(a, b) {
+  const parse = (v) => {
+    const s = String(v || '0')
+      .split(/[+-]/)[0]
+      .trim();
+    const parts = s.split('.').map((p) => {
+      const m = String(p).match(/^(\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    });
+    while (parts.length < 3) parts.push(0);
+    return parts.slice(0, 3);
+  };
+  const aa = parse(a);
+  const bb = parse(b);
+  for (let i = 0; i < 3; i++) {
+    if (aa[i] < bb[i]) return -1;
+    if (aa[i] > bb[i]) return 1;
+  }
+  return 0;
+}
+
+function isAppVersionBlocked(clientVersion, minVersion) {
+  if (!minVersion) return false;
+  return compareAppVersions(clientVersion || '0.0.0', minVersion) < 0;
+}
 
 const mediaUrl = (path) => {
   if (!path) return null;
@@ -451,7 +488,9 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
   const headers = {
     Accept: 'application/json',
     // Cloudflare blocks some empty / bot signatures without a UA
-    'User-Agent': 'CommanderPRO/1.0 (Expo; ReactNative)',
+    'User-Agent': `CommanderPRO/${APP_VERSION} (Expo; ReactNative; ${APP_PLATFORM})`,
+    'X-App-Version': String(APP_VERSION),
+    'X-App-Platform': APP_PLATFORM,
   };
   if (token) headers.Authorization = token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -572,6 +611,21 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
     err.code = 'RATE_LIMIT';
     throw err;
   }
+  // 426 Upgrade Required — server forces a newer APK/IPA
+  if (
+    response.status === 426 ||
+    (parsed && typeof parsed === 'object' && parsed.code === 'FORCE_UPDATE')
+  ) {
+    const err = new Error(
+      (parsed && (parsed.message_fr || parsed.message_en || parsed.error)) ||
+        'Mise à jour requise'
+    );
+    err.code = 'FORCE_UPDATE';
+    err.status = response.status;
+    err.forceUpdate = true;
+    err.policy = parsed && typeof parsed === 'object' ? parsed : null;
+    throw err;
+  }
 
   if (!response.ok) {
     const err = new Error(serverMsg || `Erreur (${response.status})`);
@@ -582,6 +636,55 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
   }
 
   return parsed;
+}
+
+/** Full-screen gate when API requires a newer app build */
+function ForceUpdateScreen({ policy, lang, t }) {
+  const downloadUrl =
+    (policy && policy.download_url) || DEFAULT_DOWNLOAD_URL;
+  const msg =
+    lang === 'en'
+      ? policy?.message_en ||
+        t('update.body') ||
+        'This app version is no longer supported. Please download the update.'
+      : policy?.message_fr ||
+        t('update.body') ||
+        "Cette version n'est plus supportée. Téléchargez la mise à jour.";
+  const minV = policy?.min_app_version || '—';
+  const latestV = policy?.latest_app_version || minV;
+
+  return (
+    <View style={styles.forceUpdateScreen}>
+      <StatusBar barStyle="light-content" backgroundColor="#000000" />
+      <Ionicons name="cloud-download-outline" size={56} color="#f97316" />
+      <Text style={styles.forceUpdateTitle}>{t('update.title') || 'Mise à jour requise'}</Text>
+      <Text style={styles.forceUpdateBody}>{msg}</Text>
+      <Text style={styles.forceUpdateMeta}>
+        {t('update.yourVersion') || 'Votre version'}: {APP_VERSION}
+        {'  ·  '}
+        {t('update.required') || 'Requis'}: {minV}
+        {latestV && latestV !== minV ? `  ·  ${t('update.latest') || 'Dernière'}: ${latestV}` : ''}
+      </Text>
+      <TouchableOpacity
+        style={styles.forceUpdateBtn}
+        onPress={() => {
+          Linking.openURL(downloadUrl).catch(() => {
+            Alert.alert(
+              t('update.title') || 'Mise à jour',
+              downloadUrl
+            );
+          });
+        }}
+      >
+        <Text style={styles.forceUpdateBtnText}>
+          {t('update.download') || 'Télécharger'}
+        </Text>
+      </TouchableOpacity>
+      <Text style={styles.forceUpdateHint} selectable>
+        {downloadUrl}
+      </Text>
+    </View>
+  );
 }
 
 // --- SUB-COMPONENTS ---
@@ -1383,6 +1486,8 @@ function AppInner() {
   const [appPermissions, setAppPermissions] = useState([]);
   const [isMasterLogin, setIsMasterLogin] = useState(false);
   const [isReady, setIsReady] = useState(false);
+  /** When set, app is blocked until user installs a newer APK/IPA */
+  const [forceUpdatePolicy, setForceUpdatePolicy] = useState(null);
   const [biometricGate, setBiometricGate] = useState(false);
   const [biometricHardwareOk, setBiometricHardwareOk] = useState(false);
   const [biometricEnabled, setBiometricEnabled] = useState(false);
@@ -1857,9 +1962,48 @@ function AppInner() {
     return false;
   }, [unlockWithSession, t]);
 
+  const applyForceUpdatePolicy = useCallback((policy) => {
+    if (!policy || typeof policy !== 'object') return false;
+    const minV = policy.min_app_version || policy.minAppVersion;
+    const force =
+      policy.force_update !== false &&
+      (policy.code === 'FORCE_UPDATE' ||
+        policy.force_update === true ||
+        !!minV);
+    if (!force || !minV) return false;
+    if (!isAppVersionBlocked(APP_VERSION, minV)) return false;
+    if (mountedRef.current) {
+      setForceUpdatePolicy({
+        min_app_version: minV,
+        latest_app_version: policy.latest_app_version || minV,
+        download_url: policy.download_url || DEFAULT_DOWNLOAD_URL,
+        message_fr: policy.message_fr || policy.error || '',
+        message_en: policy.message_en || policy.error || '',
+        api_version: policy.api_version || policy.version,
+      });
+    }
+    return true;
+  }, []);
+
   useEffect(() => {
     async function boot() {
       try {
+        // 1) Version gate vs API (must run even if offline → skip, not force)
+        try {
+          const health = await apiFetch('/health', { timeoutMs: 12000 });
+          if (health && applyForceUpdatePolicy(health)) {
+            if (mountedRef.current) setIsReady(true);
+            return;
+          }
+        } catch (healthErr) {
+          if (healthErr?.code === 'FORCE_UPDATE' && healthErr.policy) {
+            applyForceUpdatePolicy(healthErr.policy);
+            if (mountedRef.current) setIsReady(true);
+            return;
+          }
+          // Network down: allow offline boot UI; login will re-check
+        }
+
         const [
           hw,
           bioFlag,
@@ -1954,7 +2098,7 @@ function AppInner() {
       }
     }
     boot();
-  }, [unlockWithSession]);
+  }, [unlockWithSession, applyForceUpdatePolicy]);
 
   const handleLogin = useCallback(async () => {
     setLoginError(false);
@@ -2039,6 +2183,8 @@ function AppInner() {
         setLoginError(true);
         setLoginErrorMsg(error.message || t('err.config'));
         Alert.alert('Configuration', error.message || t('err.config'));
+      } else if (error.code === 'FORCE_UPDATE') {
+        applyForceUpdatePolicy(error.policy || { force_update: true, min_app_version: '999.0.0' });
       } else if (error.code === 'NETWORK' || error.code === 'TIMEOUT') {
         setLoginError(true);
         setLoginErrorMsg(error.message || t('err.server'));
@@ -2053,7 +2199,15 @@ function AppInner() {
     } finally {
       if (mountedRef.current) setIsLoggingIn(false);
     }
-  }, [passwordInput, usernameInput, isLoggingIn, unlockWithSession, pushActionLog, t]);
+  }, [
+    passwordInput,
+    usernameInput,
+    isLoggingIn,
+    unlockWithSession,
+    pushActionLog,
+    t,
+    applyForceUpdatePolicy,
+  ]);
 
   // --- API ---
 
@@ -2149,6 +2303,12 @@ function AppInner() {
           setLatencyMs(ms);
         }
       } catch (error) {
+        if (error.code === 'FORCE_UPDATE') {
+          applyForceUpdatePolicy(
+            error.policy || { force_update: true, min_app_version: '999.0.0' }
+          );
+          return;
+        }
         if (error.code === 'UNAUTHORIZED') {
           // Only prompt when user is actually looking at the app
           if (appStateRef.current === 'active') {
@@ -2172,7 +2332,7 @@ function AppInner() {
         if (isManualRefresh && mountedRef.current) setRefreshing(false);
       }
     },
-    [handleLogout, showBanner]
+    [handleLogout, showBanner, applyForceUpdatePolicy]
   );
 
   const fetchAdmin = useCallback(async () => {
@@ -4825,6 +4985,10 @@ function AppInner() {
     );
   }
 
+  if (forceUpdatePolicy) {
+    return <ForceUpdateScreen policy={forceUpdatePolicy} lang={lang} t={t} />;
+  }
+
   if (!isUnlocked) {
     return (
       <LockScreen
@@ -7377,6 +7541,51 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  forceUpdateScreen: {
+    flex: 1,
+    backgroundColor: '#05070c',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+  },
+  forceUpdateTitle: {
+    color: '#f8fafc',
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 18,
+    textAlign: 'center',
+  },
+  forceUpdateBody: {
+    color: '#94a3b8',
+    fontSize: 15,
+    lineHeight: 22,
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  forceUpdateMeta: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  forceUpdateBtn: {
+    marginTop: 24,
+    backgroundColor: '#f97316',
+    paddingHorizontal: 28,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  forceUpdateBtnText: {
+    color: '#0a0a0a',
+    fontWeight: '800',
+    fontSize: 16,
+  },
+  forceUpdateHint: {
+    color: '#475569',
+    fontSize: 11,
+    marginTop: 16,
+    textAlign: 'center',
   },
   lockScreen: {
     flex: 1,
