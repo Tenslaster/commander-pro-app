@@ -21,7 +21,8 @@
     "start:clear": "expo start --tunnel --go --clear",
     "android": "expo start --tunnel --go --android",
     "ios": "expo start --tunnel --go --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "build:apk": "eas build -p android --profile apk --non-interactive"
   },
   "private": true,
   "devDependencies": {

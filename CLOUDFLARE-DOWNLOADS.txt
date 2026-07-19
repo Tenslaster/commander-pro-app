@@ -1,0 +1,28 @@
+crew.kingdom.forum/downloads
+===========================
+
+Public links (only these):
+  https://crew.kingdom.forum/downloads
+  https://crew.kingdom.forum/downloads/apk
+  https://crew.kingdom.forum/downloads/ipa
+
+1) Start-Download-Server.bat  (listens on 127.0.0.1:8787)
+
+2) Cloudflare Tunnel — route PATH /downloads* to this PC:
+
+Example ingress (order matters — more specific first):
+
+  ingress:
+    - hostname: crew.kingdom.forum
+      path: /downloads*
+      service: http://127.0.0.1:8787
+    - hostname: crew.kingdom.forum
+      service: http://127.0.0.1:9601   # your API (adjust if different)
+    - service: http_status:404
+
+In Zero Trust UI:
+  Public hostname: crew.kingdom.forum
+  Path: /downloads*
+  Service: http://localhost:8787
+
+Keep download bat + tunnel running while people download.
