@@ -23,7 +23,7 @@ const BG_LAST_TS_KEY = 'bg_notify_last_ts';
 const API_URL = (
   process.env.EXPO_PUBLIC_API_URL || 'https://crew.kingdom.forum/api'
 ).replace(/\/+$/, '');
-const APP_VERSION = '1.3.4';
+const APP_VERSION = '1.3.5';
 const CHANNEL = 'commander-pro';
 
 async function ensureAndroidChannel() {

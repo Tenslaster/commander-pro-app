@@ -9,6 +9,11 @@ Commander PRO — downloads at https://crew.kingdom.forum/downloads
 
 Local default: http://0.0.0.0:8787/downloads
 Cloudflare Tunnel should send path /downloads* to this server.
+
+Security notes:
+  - Only serves two fixed files from dist/ (no directory listing / no path join from URL)
+  - Streams large APK/IPA (does not load entire file into RAM)
+  - Security headers + no-store cache for installers
 """
 
 from __future__ import annotations
@@ -18,13 +23,12 @@ import json
 import mimetypes
 import os
 import sys
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 HOST = os.environ.get("DOWNLOAD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DOWNLOAD_PORT", "8787"))
-# Public base people use (must end with /downloads)
 PUBLIC_BASE = (
     os.environ.get("DOWNLOAD_PUBLIC_URL") or "https://crew.kingdom.forum/downloads"
 ).rstrip("/")
@@ -33,19 +37,19 @@ ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 APK_NAME = "CommanderPro.apk"
 IPA_NAME = "CommanderPro.ipa"
-APK_PATH = DIST / "apk" / APK_NAME
-IPA_PATH = DIST / "ipa" / IPA_NAME
+APK_PATH = (DIST / "apk" / APK_NAME).resolve()
+IPA_PATH = (DIST / "ipa" / IPA_NAME).resolve()
 APP_JSON = ROOT / "app.json"
 VERSIONS_JSON = DIST / "versions.json"
 
 PREFIX = "/downloads"
+CHUNK = 256 * 1024
 
 mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 mimetypes.add_type("application/octet-stream", ".ipa")
 
 
 def _app_version_fallback() -> str:
-    """Fallback single version from env or app.json."""
     env = (os.environ.get("APP_VERSION") or "").strip()
     if env:
         return env
@@ -61,17 +65,15 @@ def _app_version_fallback() -> str:
 
 
 def _platform_versions() -> dict[str, str]:
-    """
-    Per-platform display versions (APK and IPA can differ).
-    Prefer dist/versions.json so the download page matches published binaries.
-    """
     android = (os.environ.get("APK_VERSION") or "").strip()
     ios = (os.environ.get("IPA_VERSION") or "").strip()
     try:
         if VERSIONS_JSON.is_file():
             data = json.loads(VERSIONS_JSON.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
-                android = android or str(data.get("android") or data.get("apk") or "").strip()
+                android = android or str(
+                    data.get("android") or data.get("apk") or ""
+                ).strip()
                 ios = ios or str(data.get("ios") or data.get("ipa") or "").strip()
     except Exception:
         pass
@@ -93,9 +95,21 @@ def _size_label(path: Path) -> str:
     return f"{n} B"
 
 
+def _safe_dist_file(path: Path) -> bool:
+    """Ensure path is a real file under dist/ (no symlink escape)."""
+    try:
+        if not path.is_file():
+            return False
+        dist_root = DIST.resolve()
+        real = path.resolve()
+        return str(real).startswith(str(dist_root) + os.sep) or real.parent == dist_root
+    except OSError:
+        return False
+
+
 def _page() -> bytes:
-    apk_ok = APK_PATH.is_file()
-    ipa_ok = IPA_PATH.is_file()
+    apk_ok = _safe_dist_file(APK_PATH)
+    ipa_ok = _safe_dist_file(IPA_PATH)
     versions = _platform_versions()
     v_android = versions["android"]
     v_ios = versions["ios"]
@@ -105,7 +119,9 @@ def _page() -> bytes:
         else f"Version {v_android}"
     )
 
-    def card(platform: str, label: str, ok: bool, size: str, href: str, version: str) -> str:
+    def card(
+        platform: str, label: str, ok: bool, size: str, href: str, version: str
+    ) -> str:
         size_txt = html.escape(size) if ok else "Unavailable"
         ver_badge = html.escape(version) if version and version != "—" else "—"
         btn = (
@@ -130,6 +146,7 @@ def _page() -> bytes:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
   <title>Commander PRO</title>
   <style>
     :root {{ color-scheme: dark; }}
@@ -241,53 +258,104 @@ def _page() -> bytes:
     return body.encode("utf-8")
 
 
-class Handler(SimpleHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
+    server_version = "CommanderDownloads/1.1"
+    sys_version = ""
+
     def log_message(self, fmt: str, *args) -> None:
+        # Do not log query strings or full URLs with secrets
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    def do_GET(self) -> None:  # noqa: N802
+    def _security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header("Cross-Origin-Resource-Policy", "same-site")
+
+    def _normalize_path(self) -> str:
         raw = unquote(urlparse(self.path).path or "/")
-        # Normalize trailing slash (except root of prefix)
-        path = raw.rstrip("/") if raw != PREFIX and raw != PREFIX + "/" else raw.rstrip("/") or PREFIX
+        # Reject path tricks early
+        if ".." in raw or "\\" in raw:
+            return "/__bad__"
+        path = (
+            raw.rstrip("/")
+            if raw != PREFIX and raw != PREFIX + "/"
+            else raw.rstrip("/") or PREFIX
+        )
         if path == "":
             path = "/"
+        return path
 
-        # Accept both /downloads and /downloads/
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._handle(body=False)
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._handle(body=True)
+
+    def _handle(self, body: bool) -> None:
+        path = self._normalize_path()
+        if path == "/__bad__":
+            self.send_error(400, "Bad path")
+            return
+
         if path in ("/", PREFIX):
             data = _page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            self._security_headers()
             self.end_headers()
-            self.wfile.write(data)
+            if body:
+                self.wfile.write(data)
             return
 
         if path in (f"{PREFIX}/apk", "/apk", f"/download/apk"):
-            self._send_file(APK_PATH, APK_NAME, "application/vnd.android.package-archive")
+            self._send_file(APK_PATH, APK_NAME, "application/vnd.android.package-archive", body)
             return
 
         if path in (f"{PREFIX}/ipa", "/ipa", f"/download/ipa"):
-            self._send_file(IPA_PATH, IPA_NAME, "application/octet-stream")
+            self._send_file(IPA_PATH, IPA_NAME, "application/octet-stream", body)
             return
 
         self.send_error(404, "Not found — use /downloads /downloads/apk /downloads/ipa")
 
-    def _send_file(self, file_path: Path, download_name: str, content_type: str) -> None:
-        if not file_path.is_file():
+    def _send_file(
+        self, file_path: Path, download_name: str, content_type: str, body: bool
+    ) -> None:
+        if not _safe_dist_file(file_path):
             self.send_error(404, f"Missing file: {download_name}")
             return
-        data = file_path.read_bytes()
+        try:
+            size = file_path.stat().st_size
+        except OSError:
+            self.send_error(404, f"Missing file: {download_name}")
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(size))
+        # RFC-friendly attachment; ASCII filename only
+        safe_name = "".join(c for c in download_name if c.isalnum() or c in "._-")
         self.send_header(
             "Content-Disposition",
-            f'attachment; filename="{download_name}"',
+            f'attachment; filename="{safe_name}"',
         )
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
-        self.wfile.write(data)
+        if not body:
+            return
+        try:
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(CHUNK)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (OSError, BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def main() -> int:
@@ -298,17 +366,14 @@ def main() -> int:
     print("=" * 52)
     print(" Commander PRO — downloads")
     print("=" * 52)
-    print(f" APK: {'OK' if APK_PATH.is_file() else 'MISSING'}  {APK_PATH}")
-    print(f" IPA: {'OK' if IPA_PATH.is_file() else 'MISSING'}  {IPA_PATH}")
+    print(f" APK: {'OK' if _safe_dist_file(APK_PATH) else 'MISSING'}  {APK_PATH}")
+    print(f" IPA: {'OK' if _safe_dist_file(IPA_PATH) else 'MISSING'}  {IPA_PATH}")
     print(f" Listen: http://{HOST}:{PORT}{PREFIX}")
     print()
     print(" Public URLs (via Cloudflare Tunnel):")
     print(f"   {PUBLIC_BASE}")
     print(f"   {PUBLIC_BASE}/apk")
     print(f"   {PUBLIC_BASE}/ipa")
-    print("=" * 52)
-    print(" Cloudflare: path /downloads* → http://127.0.0.1:%s" % PORT)
-    print(" Ctrl+C to stop.")
     print("=" * 52)
 
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)

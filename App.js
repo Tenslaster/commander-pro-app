@@ -125,9 +125,11 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.4';
+  '1.3.5';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
+/** Metro / Expo Go only — never log secrets in production APK/IPA */
+const IS_DEV = typeof __DEV__ !== 'undefined' ? !!__DEV__ : false;
 
 /** Compare semver-ish strings: returns -1 / 0 / 1 */
 function compareAppVersions(a, b) {
@@ -2144,7 +2146,14 @@ function AppInner() {
       if (ok) {
         deviceRegisteredRef.current = true;
         pushOkRef.current = client === 'standalone';
-        console.log('Device registered', client, Platform.OS, String(pushToken).slice(0, 36));
+        if (IS_DEV) {
+          console.log(
+            'Device registered',
+            client,
+            Platform.OS,
+            String(pushToken).startsWith('ExponentPushToken') ? 'ExponentPushToken[…]' : 'LocalDevice[…]'
+          );
+        }
       }
       return ok;
     };
@@ -4031,7 +4040,7 @@ function AppInner() {
       Alert.alert(t('manage.create'), t('manage.invalidUser'));
       return;
     }
-    if (!password || password.length < 4) {
+    if (!password || password.length < 8) {
       Alert.alert(t('manage.create'), t('manage.passwordShort'));
       return;
     }
@@ -4121,7 +4130,7 @@ function AppInner() {
         );
       }
       if (patch?.level != null && patch.level !== '') body.level = patch.level;
-      if (patch?.password != null && String(patch.password).length >= 4) {
+      if (patch?.password != null && String(patch.password).length >= 8) {
         body.password = String(patch.password);
       }
       if (typeof patch?.active === 'boolean') body.active = patch.active;

@@ -27,12 +27,18 @@ credentials/
 *-firebase-adminsdk-*.json
 service-account*.json
 
-# Logs / OS
+# Logs / OS / local build noise
 npm-debug.*
 yarn-debug.*
 yarn-error.*
 *.log
 ios-builder-last-run.log
+eas-*.log
+eas-*.json
+eas-status.txt
+eas-latest.json
+__pycache__/
+*.pyc
 .DS_Store
 Thumbs.db
 
