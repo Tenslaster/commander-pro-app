@@ -125,7 +125,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.5';
+  '1.3.6';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -359,10 +359,39 @@ const ROLE_COLORS = {
   RADIO3: '#fbbf24',
   RADIO4: '#f472b6',
   RADIO5: '#fb923c',
+  RADIO6: '#a78bfa',
+  RADIO7: '#22d3ee',
+  RADIO8: '#f43f5e',
+  RADIO9: '#84cc16',
+  RADIO10: '#e879f9',
 };
 
-const NOTIFY_AUDIENCES = ['ALL', 'OWNER', 'RADIO1', 'RADIO2', 'RADIO3', 'RADIO4', 'RADIO5'];
-const STATION_IDS = ['RADIO1', 'RADIO2', 'RADIO3', 'RADIO4', 'RADIO5'];
+const NOTIFY_AUDIENCES = [
+  'ALL',
+  'OWNER',
+  'RADIO1',
+  'RADIO2',
+  'RADIO3',
+  'RADIO4',
+  'RADIO5',
+  'RADIO6',
+  'RADIO7',
+  'RADIO8',
+  'RADIO9',
+  'RADIO10',
+];
+const STATION_IDS = [
+  'RADIO1',
+  'RADIO2',
+  'RADIO3',
+  'RADIO4',
+  'RADIO5',
+  'RADIO6',
+  'RADIO7',
+  'RADIO8',
+  'RADIO9',
+  'RADIO10',
+];
 const USER_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin', 'owner', 'dev'];
 const OWNER_ONLY_RANKS = new Set(['owner', 'dev']);
 const RADIO_ADMIN_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin'];
