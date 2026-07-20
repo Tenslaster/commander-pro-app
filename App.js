@@ -134,7 +134,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.7';
+  '1.3.8';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -675,6 +675,9 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
     'X-App-Version': String(APP_VERSION),
     'X-App-Platform': APP_PLATFORM,
     'X-Device-Integrity': _deviceIntegrityHeader,
+    'X-Device-Name': String(
+      Device.modelName || Device.deviceName || Device.modelId || ''
+    ).slice(0, 48),
   };
   if (token) headers.Authorization = token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -1802,7 +1805,11 @@ function AppInner() {
   const [notifyLoading, setNotifyLoading] = useState(false);
 
   // Real user chat (public + private Owner↔Radio) — Discord replacement
-  const [mainTab, setMainTab] = useState('radios'); // radios | users | chat | alerts | manage
+  const [mainTab, setMainTab] = useState('radios'); // radios | users | chat | alerts | manage | security
+  // OWNER security console
+  const [securityData, setSecurityData] = useState(null);
+  const [securityLoading, setSecurityLoading] = useState(false);
+  const [securityBusy, setSecurityBusy] = useState(false);
   const [chatChannels, setChatChannels] = useState([]);
   const [chatUnreadTotal, setChatUnreadTotal] = useState(0);
   const [activeChat, setActiveChat] = useState(null); // channel meta
@@ -2953,12 +2960,75 @@ function AppInner() {
     const token = authTokenRef.current;
     if (!token || userRoleRef.current !== 'OWNER') return;
     try {
-      const data = await apiFetch('/admin', { token });
+      const data = await apiFetch('/admin', { token, timeoutMs: 12000 });
       if (mountedRef.current) setAdminData(data);
     } catch (error) {
       if (error.code === 'UNAUTHORIZED') handleLogout();
     }
   }, [handleLogout]);
+
+  const fetchSecurity = useCallback(
+    async ({ silent = true } = {}) => {
+      const token = authTokenRef.current;
+      if (!token || userRoleRef.current !== 'OWNER') return;
+      if (!silent && mountedRef.current) setSecurityLoading(true);
+      try {
+        const data = await apiFetch('/security', { token, timeoutMs: 12000 });
+        if (mountedRef.current && data && typeof data === 'object') {
+          setSecurityData(data);
+        }
+      } catch (error) {
+        if (error.code === 'UNAUTHORIZED') handleLogout();
+        else if (!silent && mountedRef.current) {
+          showBanner(error.message || t('err.server'), 'warn');
+        }
+      } finally {
+        if (mountedRef.current) setSecurityLoading(false);
+      }
+    },
+    [handleLogout, showBanner, t]
+  );
+
+  const kickSecuritySession = useCallback(
+    (sessionRow) => {
+      if (!isOwner || !sessionRow?.token_suffix || securityBusy) return;
+      if (sessionRow.is_self) {
+        Alert.alert(t('security.title'), t('security.kickSelf'));
+        return;
+      }
+      Alert.alert(t('security.kick'), t('security.kickConfirm'), [
+        { text: t('common.cancel') || 'Cancel', style: 'cancel' },
+        {
+          text: t('security.kick'),
+          style: 'destructive',
+          onPress: async () => {
+            setSecurityBusy(true);
+            try {
+              await apiFetch('/admin/action', {
+                method: 'POST',
+                token: authTokenRef.current,
+                body: {
+                  action: 'kick_sessions',
+                  token_suffix: sessionRow.token_suffix,
+                  include_self: false,
+                },
+                timeoutMs: 10000,
+              });
+              showBanner(t('security.kick') + ' ✓', 'ok');
+              fetchSecurity({ silent: true });
+              fetchAdmin();
+            } catch (error) {
+              if (error.code === 'UNAUTHORIZED') handleLogout();
+              else Alert.alert(t('security.title'), error.message || t('err.generic'));
+            } finally {
+              if (mountedRef.current) setSecurityBusy(false);
+            }
+          },
+        },
+      ]);
+    },
+    [isOwner, securityBusy, fetchSecurity, fetchAdmin, handleLogout, showBanner, t]
+  );
 
   const markNotificationsRead = useCallback(async (items) => {
     const latest = items.reduce((max, it) => Math.max(max, Number(it.ts) || 0), 0);
@@ -5495,7 +5565,11 @@ function AppInner() {
 
   // Never leave mainTab in an unknown / unauthorized state (blank UI or push deep-link)
   useEffect(() => {
-    if (!['radios', 'users', 'chat', 'alerts', 'playlist', 'manage'].includes(mainTab)) {
+    if (
+      !['radios', 'users', 'chat', 'alerts', 'playlist', 'manage', 'security'].includes(
+        mainTab
+      )
+    ) {
       setMainTab('radios');
       return;
     }
@@ -5504,7 +5578,27 @@ function AppInner() {
     else if (mainTab === 'alerts' && !canAlerts) setMainTab('radios');
     else if (mainTab === 'playlist' && !canPlaylist) setMainTab('radios');
     else if (mainTab === 'manage' && !canManageAppUsers) setMainTab('radios');
-  }, [mainTab, canUsersTab, canChat, canAlerts, canPlaylist, canManageAppUsers]);
+    else if (mainTab === 'security' && !isOwner) setMainTab('radios');
+  }, [
+    mainTab,
+    canUsersTab,
+    canChat,
+    canAlerts,
+    canPlaylist,
+    canManageAppUsers,
+    isOwner,
+  ]);
+
+  // Security tab: poll only while visible (smooth + low load)
+  useEffect(() => {
+    if (!isUnlocked || !isOwner || mainTab !== 'security') return undefined;
+    fetchSecurity({ silent: true });
+    const id = setInterval(() => {
+      if (appStateRef.current !== 'active') return;
+      fetchSecurity({ silent: true });
+    }, 8000);
+    return () => clearInterval(id);
+  }, [isUnlocked, isOwner, mainTab, fetchSecurity]);
 
   const renderSectionHeader = useCallback(({ section }) => {
     if (!section?.title) return null;
@@ -5711,9 +5805,15 @@ function AppInner() {
   }
 
   const tabPadBottom = BOTTOM_NAV_HEIGHT + Math.max(insets.bottom, 8);
-  const safeMainTab = ['radios', 'users', 'chat', 'alerts', 'playlist', 'manage'].includes(
-    mainTab
-  )
+  const safeMainTab = [
+    'radios',
+    'users',
+    'chat',
+    'alerts',
+    'playlist',
+    'manage',
+    'security',
+  ].includes(mainTab)
     ? mainTab
     : 'radios';
 
@@ -5738,6 +5838,8 @@ function AppInner() {
                     ? t('tab.users')
                     : safeMainTab === 'playlist'
                       ? t('tab.playlist')
+                      : safeMainTab === 'security'
+                        ? t('nav.security')
                       : safeMainTab === 'manage'
                         ? t('tab.manage')
                         : (
@@ -5766,6 +5868,7 @@ function AppInner() {
                 {safeMainTab === 'users' ? ` · ${effectiveUsersStation}` : ''}
                 {safeMainTab === 'playlist' ? ` · ${effectivePlaylistStation}` : ''}
                 {safeMainTab === 'manage' ? ` · ${t('nav.manage')}` : ''}
+                {safeMainTab === 'security' ? ` · ${t('nav.security')}` : ''}
               </Text>
             </View>
           </View>
@@ -6988,8 +7091,193 @@ function AppInner() {
           </View>
         ) : null}
 
+        {/* ===== TAB: SECURITY (OWNER only) ===== */}
+        {safeMainTab === 'security' && isOwner ? (
+          <ScrollView
+            style={styles.tabBody}
+            contentContainerStyle={[
+              styles.tabListContent,
+              { paddingBottom: tabPadBottom + 16 },
+            ]}
+            refreshControl={
+              <RefreshControl
+                refreshing={securityLoading}
+                onRefresh={() => fetchSecurity({ silent: false })}
+                tintColor="#f97316"
+                colors={['#f97316']}
+              />
+            }
+          >
+            <View style={styles.secHero}>
+              <Ionicons name="shield-checkmark" size={28} color="#f97316" />
+              <Text style={styles.secHeroTitle}>{t('security.title')}</Text>
+              <Text style={styles.secHeroSub}>{t('security.subtitle')}</Text>
+            </View>
+
+            {securityLoading && !securityData ? (
+              <View style={styles.emptyWrap}>
+                <ActivityIndicator color="#f97316" />
+                <Text style={styles.emptyText}>{t('security.loading')}</Text>
+              </View>
+            ) : null}
+
+            {securityData?.summary ? (
+              <View style={styles.secSummaryRow}>
+                <View style={styles.secStat}>
+                  <Text style={styles.secStatN}>{securityData.summary.sessions_total ?? 0}</Text>
+                  <Text style={styles.secStatL}>{t('security.sessions')}</Text>
+                </View>
+                <View style={styles.secStat}>
+                  <Text style={styles.secStatN}>{securityData.summary.unique_ips ?? 0}</Text>
+                  <Text style={styles.secStatL}>{t('security.ips')}</Text>
+                </View>
+                <View style={styles.secStat}>
+                  <Text style={[styles.secStatN, { color: '#f87171' }]}>
+                    {securityData.summary.risk_high ?? 0}
+                  </Text>
+                  <Text style={styles.secStatL}>{t('security.riskHigh')}</Text>
+                </View>
+                <View style={styles.secStat}>
+                  <Text style={styles.secStatN}>{securityData.summary.push_devices ?? 0}</Text>
+                  <Text style={styles.secStatL}>{t('security.devices')}</Text>
+                </View>
+              </View>
+            ) : null}
+
+            <Text style={styles.secSection}>{t('security.sessions')}</Text>
+            {(securityData?.sessions || []).length === 0 ? (
+              <Text style={styles.secEmpty}>{t('security.empty')}</Text>
+            ) : (
+              (securityData?.sessions || []).map((s) => {
+                const riskColor =
+                  s.risk === 'high' ? '#f87171' : s.risk === 'medium' ? '#fbbf24' : '#34d399';
+                const riskLabel =
+                  s.risk === 'high'
+                    ? t('security.riskHigh')
+                    : s.risk === 'medium'
+                      ? t('security.riskMed')
+                      : t('security.riskOk');
+                return (
+                  <View key={`sess-${s.token_suffix}-${s.ip}`} style={styles.secCard}>
+                    <View style={styles.secCardTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.secCardTitle} numberOfLines={1}>
+                          {s.username || s.role || '—'}
+                          {s.is_self ? ` · ${t('security.kickSelf')}` : ''}
+                        </Text>
+                        <Text style={styles.secCardMeta} numberOfLines={2}>
+                          {s.role}
+                          {s.level ? ` · ${s.level}` : ''}
+                          {s.is_master ? ' · master' : ''}
+                          {` · …${s.token_suffix || ''}`}
+                        </Text>
+                      </View>
+                      <View style={[styles.secRiskPill, { borderColor: riskColor }]}>
+                        <Text style={[styles.secRiskText, { color: riskColor }]}>
+                          {riskLabel}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.secIp} selectable>
+                      IPv4  {s.ip || '—'}
+                    </Text>
+                    {s.geo?.label ? (
+                      <Text style={styles.secGeo} numberOfLines={2}>
+                        📍 {s.geo.label}
+                        {s.geo.isp ? ` · ${s.geo.isp}` : ''}
+                      </Text>
+                    ) : null}
+                    {s.ip_history?.length > 1 ? (
+                      <Text style={styles.secCardMeta} numberOfLines={2}>
+                        IPs: {(s.ip_history || []).join(' → ')}
+                      </Text>
+                    ) : null}
+                    <Text style={styles.secCardMeta} numberOfLines={2}>
+                      {s.platform || '?'} · v{s.app_version || '?'}
+                      {s.device_name ? ` · ${s.device_name}` : ''}
+                      {s.device_integrity ? ` · ${s.device_integrity}` : ''}
+                    </Text>
+                    <Text style={styles.secCardMeta}>
+                      idle {s.idle_sec != null ? `${s.idle_sec}s` : '—'}
+                      {s.age_sec != null ? ` · age ${Math.round(s.age_sec / 60)}m` : ''}
+                    </Text>
+                    {!s.is_self ? (
+                      <TouchableOpacity
+                        style={styles.secKickBtn}
+                        onPress={() => kickSecuritySession(s)}
+                        disabled={securityBusy}
+                      >
+                        <Ionicons name="hand-left-outline" size={14} color="#fecaca" />
+                        <Text style={styles.secKickText}>{t('security.kick')}</Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                );
+              })
+            )}
+
+            <Text style={styles.secSection}>{t('security.failed')}</Text>
+            {(securityData?.failed_logins || []).length === 0 ? (
+              <Text style={styles.secEmpty}>{t('security.empty')}</Text>
+            ) : (
+              (securityData?.failed_logins || []).map((f) => (
+                <View key={`fail-${f.ip}`} style={styles.secCard}>
+                  <Text style={styles.secIp} selectable>
+                    {f.ip}
+                  </Text>
+                  {f.geo?.label ? (
+                    <Text style={styles.secGeo} numberOfLines={2}>
+                      📍 {f.geo.label}
+                      {f.geo.isp ? ` · ${f.geo.isp}` : ''}
+                    </Text>
+                  ) : null}
+                  <Text style={styles.secCardMeta}>
+                    fails: {f.fail_count}
+                    {f.locked
+                      ? ` · ${t('security.locked')} ${f.lockout_remaining_sec || 0}s`
+                      : ''}
+                  </Text>
+                </View>
+              ))
+            )}
+
+            <Text style={styles.secSection}>{t('security.devices')}</Text>
+            {(securityData?.push_devices || []).length === 0 ? (
+              <Text style={styles.secEmpty}>{t('security.empty')}</Text>
+            ) : (
+              (securityData?.push_devices || []).slice(0, 40).map((d, i) => (
+                <View key={`dev-${d.token_suffix}-${i}`} style={styles.secCard}>
+                  <Text style={styles.secCardTitle} numberOfLines={1}>
+                    {d.role || '?'} · {d.client || '?'} · …{d.token_suffix || ''}
+                  </Text>
+                  <Text style={styles.secIp} selectable>
+                    {d.last_ip || '—'}
+                  </Text>
+                  {d.geo?.label ? (
+                    <Text style={styles.secGeo} numberOfLines={2}>
+                      📍 {d.geo.label}
+                    </Text>
+                  ) : null}
+                  <Text style={styles.secCardMeta}>
+                    {d.platform || '?'} · v{d.app_version || '?'}
+                  </Text>
+                </View>
+              ))
+            )}
+
+            <TouchableOpacity
+              style={[styles.loginBtn, { marginTop: 12, marginBottom: 24 }]}
+              onPress={() => fetchSecurity({ silent: false })}
+            >
+              <Text style={styles.loginBtnText}>{t('security.refresh')}</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        ) : null}
+
         {/* Fallback if no tab content matched (should never happen) */}
-        {!['radios', 'users', 'chat', 'alerts', 'playlist', 'manage'].includes(safeMainTab) ? (
+        {!['radios', 'users', 'chat', 'alerts', 'playlist', 'manage', 'security'].includes(
+          safeMainTab
+        ) ? (
           <View style={[styles.tabBody, styles.emptyWrap]}>
             <Text style={styles.emptyText}>Onglet inconnu — retour Radios…</Text>
             <TouchableOpacity
@@ -7066,13 +7354,26 @@ function AppInner() {
             {canManageAppUsers ? (
               <BottomNavItem
                 active={safeMainTab === 'manage'}
-                icon="shield-outline"
-                iconActive="shield-checkmark"
+                icon="people-circle-outline"
+                iconActive="people-circle"
                 color="#fbbf24"
                 label={t('nav.manage')}
                 onPress={() => {
                   switchMainTab('manage');
                   fetchAppUsers({ silent: true });
+                }}
+              />
+            ) : null}
+            {isOwner ? (
+              <BottomNavItem
+                active={safeMainTab === 'security'}
+                icon="lock-closed-outline"
+                iconActive="lock-closed"
+                color="#f97316"
+                label={t('nav.security')}
+                onPress={() => {
+                  switchMainTab('security');
+                  fetchSecurity({ silent: false });
                 }}
               />
             ) : null}
@@ -9232,6 +9533,136 @@ const styles = StyleSheet.create({
   },
   manageStationLockText: { fontSize: 14, fontWeight: '900', letterSpacing: 0.4 },
   manageStationLockHint: { color: '#64748b', fontSize: 11, flex: 1, minWidth: 120 },
+  secHero: {
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  secHeroTitle: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: '800',
+    marginTop: 8,
+  },
+  secHeroSub: {
+    color: '#94a3b8',
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 18,
+  },
+  secSummaryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 14,
+  },
+  secStat: {
+    flexGrow: 1,
+    minWidth: '22%',
+    backgroundColor: 'rgba(15,23,42,0.9)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  secStatN: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  secStatL: {
+    color: '#64748b',
+    fontSize: 10,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  secSection: {
+    color: '#f97316',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    marginTop: 10,
+    marginBottom: 8,
+    textTransform: 'uppercase',
+  },
+  secEmpty: {
+    color: '#64748b',
+    fontSize: 13,
+    fontStyle: 'italic',
+    marginBottom: 10,
+  },
+  secCard: {
+    backgroundColor: 'rgba(15,23,42,0.95)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    marginBottom: 10,
+  },
+  secCardTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginBottom: 6,
+  },
+  secCardTitle: {
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  secCardMeta: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  secIp: {
+    color: '#38bdf8',
+    fontSize: 14,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  secGeo: {
+    color: '#a5b4fc',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+    lineHeight: 16,
+  },
+  secRiskPill: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  secRiskText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  secKickBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(127,29,29,0.45)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(248,113,113,0.35)',
+  },
+  secKickText: {
+    color: '#fecaca',
+    fontSize: 13,
+    fontWeight: '700',
+  },
   manageCard: {
     backgroundColor: 'rgba(251,191,36,0.06)',
     borderWidth: 1,

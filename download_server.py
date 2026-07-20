@@ -270,8 +270,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header(
+            "Permissions-Policy",
+            "geolocation=(), microphone=(), camera=(), payment=(), usb=()",
+        )
         self.send_header("Cross-Origin-Resource-Policy", "same-site")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src 'none'; font-src 'none'; connect-src 'none'; "
+            "script-src 'none'; object-src 'none'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'none'",
+        )
+        # HSTS only meaningful behind HTTPS (Cloudflare terminates TLS)
+        self.send_header(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
 
     def _normalize_path(self) -> str:
         raw = unquote(urlparse(self.path).path or "/")
