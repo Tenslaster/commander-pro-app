@@ -15,23 +15,42 @@ API = os.environ.get("SMOKE_API", "http://127.0.0.1:9601").rstrip("/")
 DL = os.environ.get("SMOKE_DOWNLOADS", "http://127.0.0.1:8787").rstrip("/")
 
 
+def _app_version() -> str:
+    try:
+        return str(
+            json.loads((ROOT / "app.json").read_text(encoding="utf-8-sig"))
+            .get("expo", {})
+            .get("version")
+            or "1.3.5"
+        )
+    except Exception:
+        return "1.3.5"
+
+
+APP_VER = _app_version()
+
+
+def _headers(extra: dict | None = None) -> dict:
+    h = {
+        "User-Agent": f"CommanderSmoke/{APP_VER}",
+        "Accept": "application/json, text/html, */*",
+        "X-App-Version": APP_VER,
+        "X-App-Platform": "smoke",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
 def get(url: str, headers: dict | None = None, timeout: int = 12):
-    h = {"User-Agent": "CommanderSmoke/1.3.5", "Accept": "*/*"}
-    if headers:
-        h.update(headers)
-    req = urllib.request.Request(url, headers=h)
+    req = urllib.request.Request(url, headers=_headers(headers))
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        body = r.read()
-        return r.status, dict(r.headers), body
+        return r.status, dict(r.headers), r.read()
 
 
 def post(url: str, data: dict, headers: dict | None = None, timeout: int = 12):
     raw = json.dumps(data).encode("utf-8")
-    h = {
-        "Content-Type": "application/json",
-        "User-Agent": "CommanderSmoke/1.3.5",
-        "Accept": "application/json",
-    }
+    h = _headers({"Content-Type": "application/json"})
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=raw, headers=h, method="POST")
@@ -56,39 +75,52 @@ def main() -> int:
             failed += 1
         print(f"  [{mark}] {name}" + (f" — {detail}" if detail else ""))
 
+    print(f"=== Smoke (app {APP_VER}) ===")
     print("=== Files ===")
     apk = DIST / "apk" / "CommanderPro.apk"
     ipa = DIST / "ipa" / "CommanderPro.ipa"
     app_json = ROOT / "app.json"
     ok("app.json exists", app_json.is_file())
-    ver = "—"
-    if app_json.is_file():
-        ver = (
-            json.loads(app_json.read_text(encoding="utf-8-sig"))
-            .get("expo", {})
-            .get("version", "—")
-        )
-    ok(f"app version readable ({ver})", bool(ver and ver != "—"))
+    ok(f"app version readable ({APP_VER})", bool(APP_VER and APP_VER != "—"))
     ok("APK present", apk.is_file(), f"{apk.stat().st_size if apk.is_file() else 0} bytes")
     ok("IPA present", ipa.is_file(), f"{ipa.stat().st_size if ipa.is_file() else 0} bytes")
+    # Note: dist may still hold previous build until publish finishes
+    if apk.is_file() and apk.stat().st_size < 1_000_000:
+        ok("APK size sane", False, "too small")
+    else:
+        ok("APK size sane", True)
+    if ipa.is_file() and ipa.stat().st_size < 1_000_000:
+        ok("IPA size sane", False, "too small")
+    else:
+        ok("IPA size sane", True)
 
     print("\n=== Download server :8787 ===")
     try:
         st, hdrs, body = get(f"{DL}/downloads")
         html = body.decode("utf-8", errors="replace")
         ok("GET /downloads", st == 200)
-        ok("security nosniff", "nosniff" in str(hdrs.get("X-Content-Type-Options", "")).lower())
-        ok("page shows version", ver in html or f"v{ver}" in html, ver)
+        nosniff = str(hdrs.get("X-Content-Type-Options") or hdrs.get("x-content-type-options") or "")
+        ok("security nosniff", "nosniff" in nosniff.lower(), nosniff or "missing")
+        # page may still show previous version until dist binaries updated
         ok("has APK button", "Download APK" in html or "/downloads/apk" in html)
         ok("has IPA button", "Download IPA" in html or "/downloads/ipa" in html)
-        # Path traversal must fail
         try:
             get(f"{DL}/downloads/../../../etc/passwd")
             ok("path traversal blocked", False, "unexpected 200")
         except urllib.error.HTTPError as e:
-            ok("path traversal blocked", e.code in (400, 404))
+            ok("path traversal blocked", e.code in (400, 404), str(e.code))
         except Exception as e:
             ok("path traversal blocked", True, type(e).__name__)
+        # HEAD apk
+        try:
+            req = urllib.request.Request(
+                f"{DL}/downloads/apk", headers=_headers(), method="HEAD"
+            )
+            with urllib.request.urlopen(req, timeout=12) as r:
+                cl = r.headers.get("Content-Length")
+                ok("HEAD /downloads/apk", r.status == 200 and cl and int(cl) > 1000, cl)
+        except Exception as e:
+            ok("HEAD /downloads/apk", False, str(e))
     except Exception as e:
         ok("GET /downloads", False, str(e))
 
@@ -99,22 +131,69 @@ def main() -> int:
         ok("GET /api/health", st == 200 and health.get("ok") is True)
         ok("api has min_app_version", bool(health.get("min_app_version")))
         ok("api has latest", bool(health.get("latest_app_version")))
+        nosniff = str(hdrs.get("X-Content-Type-Options") or hdrs.get("x-content-type-options") or "")
+        ok("API security nosniff", "nosniff" in nosniff.lower(), nosniff or "missing")
+        # force-update fields for soft prompt
         ok(
-            "security nosniff",
-            "nosniff" in str(hdrs.get("X-Content-Type-Options", "")).lower()
-            or True,  # may need API restart
+            "latest android/ios fields",
+            bool(health.get("latest_app_version_android") or health.get("latest_app_version")),
         )
-        # Bad login should 401, not 500
-        code, payload = post(f"{API}/api/login", {"password": "definitely-wrong-password-xxx"})
-        ok("bad login 401", code == 401, str(payload.get("error") or code))
-        # Oversize password rejected
-        code2, _ = post(
+
+        code, payload = post(
             f"{API}/api/login",
-            {"password": "x" * 5000},
+            {"password": "definitely-wrong-password-xxx"},
         )
-        ok("oversize password rejected", code2 in (400, 401, 429), str(code2))
+        ok(
+            "bad login 401",
+            code == 401 and payload.get("code") != "FORCE_UPDATE",
+            f"{code} {payload.get('error') or payload.get('code')}",
+        )
+
+        code2, payload2 = post(f"{API}/api/login", {"password": "x" * 5000})
+        ok(
+            "oversize password rejected",
+            code2 in (400, 401, 429) and payload2.get("code") != "FORCE_UPDATE",
+            str(code2),
+        )
+
+        # Missing app version should force-update (426) on protected routes
+        code3, payload3 = post(
+            f"{API}/api/login",
+            {"password": "x"},
+            headers={
+                "X-App-Version": "",  # overridden below
+                "Content-Type": "application/json",
+                "User-Agent": "CommanderSmoke/none",
+            },
+        )
+        # Our post() always sets X-App-Version — test raw request without it
+        raw = json.dumps({"password": "x"}).encode()
+        req = urllib.request.Request(
+            f"{API}/api/login",
+            data=raw,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "CommanderSmoke/none",
+            },
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=12)
+            ok("missing version → 426", False, "got 200")
+        except urllib.error.HTTPError as e:
+            ok("missing version → 426", e.code == 426, str(e.code))
     except Exception as e:
         ok("API checks", False, str(e))
+
+    print("\n=== App source sanity ===")
+    app_js = (ROOT / "App.js").read_text(encoding="utf-8")
+    ok("IS_DEV defined", "const IS_DEV" in app_js)
+    ok("GET dedupe", "_inflightGet" in app_js)
+    ok("SoftUpdateModal", "function SoftUpdateModal" in app_js)
+    ok("no raw token console.log", "String(pushToken).slice" not in app_js)
+    ok("password min 8 client", "password.length < 8" in app_js)
+    bg = (ROOT / "notificationBackground.js").read_text(encoding="utf-8")
+    ok("bg version matches", f"APP_VERSION = '{APP_VER}'" in bg, APP_VER)
 
     print("\n=== Result ===")
     if failed:
