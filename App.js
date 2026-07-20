@@ -34,6 +34,7 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import * as Device from 'expo-device';
 import * as SecureStore from 'expo-secure-store';
+import { assessDeviceIntegrity, assertSecureApiUrl } from './deviceSecurity';
 import * as ImagePicker from 'expo-image-picker';
 import { LANG_KEY, createT, normalizeLang } from './i18n';
 import {
@@ -116,7 +117,15 @@ setupAndroidNotificationChannels();
 // Production default baked in so EAS APK/IPA work even when .env is gitignored.
 // Override locally with EXPO_PUBLIC_API_URL in .env if needed.
 const DEFAULT_API_URL = 'https://crew.kingdom.forum/api';
-const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
+const _rawApiUrl = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
+// Production standalone must use HTTPS (rooted proxies / MITM on cleartext)
+const API_URL = (() => {
+  const check = assertSecureApiUrl(_rawApiUrl);
+  if (!check.ok && !IS_EXPO_GO) {
+    return DEFAULT_API_URL;
+  }
+  return _rawApiUrl;
+})();
 /** Base host without trailing /api — used for /api/chat/media/... images */
 const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 
@@ -125,7 +134,7 @@ const APP_VERSION =
   Constants.expoConfig?.version ||
   Constants.nativeAppVersion ||
   Constants.manifest?.version ||
-  '1.3.6';
+  '1.3.7';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -401,8 +410,12 @@ const USER_LIST_FILTER_DEFS = [
   { id: 'banned', labelKey: 'users.filter.banned', color: '#f87171' },
   { id: 'vip', labelKey: 'VIP', color: '#fbbf24' },
   { id: 'mod', labelKey: 'Mod', color: '#34d399' },
+  { id: 'admin', labelKey: 'Admin', color: '#60a5fa' },
   { id: 'owner', labelKey: 'Owner', color: '#c084fc' },
 ];
+/** Browse / search page sizes (radios can exceed 2k users) */
+const USERS_BROWSE_LIMIT = 15000;
+const USERS_SEARCH_LIMIT = 8000;
 const RANK_LABELS_FR = {
   guest: 'Invité',
   vip: 'VIP',
@@ -651,6 +664,9 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
   return run;
 }
 
+/** Filled once at boot — sent on API calls for server-side risk signals */
+let _deviceIntegrityHeader = 'unknown';
+
 async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeoutMs } = {}) {
   const headers = {
     Accept: 'application/json',
@@ -658,6 +674,7 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
     'User-Agent': `CommanderPRO/${APP_VERSION} (Expo; ReactNative; ${APP_PLATFORM})`,
     'X-App-Version': String(APP_VERSION),
     'X-App-Platform': APP_PLATFORM,
+    'X-Device-Integrity': _deviceIntegrityHeader,
   };
   if (token) headers.Authorization = token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -2528,6 +2545,30 @@ function AppInner() {
       if (bootedRef.current) return;
       bootedRef.current = true;
       try {
+        // Device integrity (rooted / jailbreak heuristics) — warn, still allow use
+        try {
+          const integ = await assessDeviceIntegrity();
+          _deviceIntegrityHeader = integ.compromised
+            ? `risk:${(integ.reasons || []).join(',') || 'flagged'}`
+            : integ.isDevice
+              ? 'ok'
+              : 'emulator';
+          if (
+            integ.compromised &&
+            !IS_EXPO_GO &&
+            mountedRef.current
+          ) {
+            showBanner(
+              langRef.current === 'en'
+                ? 'Security: this device looks modified (root/jailbreak). Be careful with logins.'
+                : 'Sécurité: appareil modifié (root/jailbreak). Attention aux identifiants.',
+              'warn'
+            );
+          }
+        } catch {
+          _deviceIntegrityHeader = 'unknown';
+        }
+
         // 1) Version gate vs API (must run even if offline → skip, not force)
         try {
           const health = await apiFetch('/health', { timeoutMs: 12000 });
@@ -2674,6 +2715,9 @@ function AppInner() {
         timeoutMs: 20000,
       });
 
+      // Wipe password from React state ASAP (rooted devices can dump memory)
+      setPasswordInput('');
+
       if (!data?.token || !data?.role) {
         const err = new Error('Réponse invalide du serveur');
         err.code = 'HTTP';
@@ -2816,7 +2860,18 @@ function AppInner() {
         // Stable order so the list doesn't jump every poll
         procArray.sort((a, b) => {
           if (a.is_bot !== b.is_bot) return a.is_bot ? -1 : 1;
-          return a.id.localeCompare(b.id, undefined, { sensitivity: 'base' });
+          // Natural RADIO# order: RADIO10 after RADIO9 (not before RADIO2)
+          const radioNum = (id) => {
+            const m = String(id || '').match(/RADIO(\d+)/i);
+            return m ? parseInt(m[1], 10) : 9999;
+          };
+          const na = radioNum(a.id);
+          const nb = radioNum(b.id);
+          if (na !== nb) return na - nb;
+          return String(a.id).localeCompare(String(b.id), undefined, {
+            sensitivity: 'base',
+            numeric: true,
+          });
         });
 
         // Skip alerts on first successful snapshot after login
@@ -3885,8 +3940,8 @@ function AppInner() {
       if (!silent && mountedRef.current) setUsersLoading(true);
       try {
         const data = await apiFetch(
-          `/users?station=${encodeURIComponent(station)}&filter=all&limit=2000`,
-          { token, signal: ac?.signal }
+          `/users?station=${encodeURIComponent(station)}&filter=all&limit=${USERS_BROWSE_LIMIT}`,
+          { token, signal: ac?.signal, timeoutMs: 45000 }
         );
         if (!mountedRef.current || gen !== usersFetchGenRef.current) return;
         const returned = data?.station || station;
@@ -3954,8 +4009,8 @@ function AppInner() {
       if (mountedRef.current) setUsersSearching(true);
       try {
         const data = await apiFetch(
-          `/users?station=${encodeURIComponent(station)}&q=${encodeURIComponent(q)}&filter=all&limit=3000`,
-          { token, signal: ac?.signal }
+          `/users?station=${encodeURIComponent(station)}&q=${encodeURIComponent(q)}&filter=all&limit=${USERS_SEARCH_LIMIT}`,
+          { token, signal: ac?.signal, timeoutMs: 45000 }
         );
         if (!mountedRef.current || gen !== usersSearchGenRef.current) return;
         const returned = data?.station || station;
