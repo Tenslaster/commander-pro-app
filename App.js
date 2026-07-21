@@ -129,12 +129,10 @@ const API_URL = (() => {
 /** Base host without trailing /api — used for /api/chat/media/... images */
 const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 
-/** App store / build version — must stay >= API min_app_version (see app_version_policy.json) */
-const APP_VERSION =
-  Constants.expoConfig?.version ||
-  Constants.nativeAppVersion ||
-  Constants.manifest?.version ||
-  '1.3.8';
+/** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
+ *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
+ */
+const APP_VERSION = '1.3.8';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -4746,11 +4744,24 @@ function AppInner() {
       if (!token || !processId) return;
       try {
         const data = await apiFetch(
-          `/logs?target=${encodeURIComponent(processId)}&limit=60`,
-          { token }
+          `/logs?target=${encodeURIComponent(processId)}&limit=120`,
+          { token, timeoutMs: 12000 }
         );
         if (!mountedRef.current) return;
-        const next = Array.isArray(data) ? data : [];
+        let next = Array.isArray(data) ? data : [];
+        // Normalize API rows
+        next = next
+          .map((row) => {
+            if (typeof row === 'string') return { text: row, type: 'info' };
+            if (row && typeof row === 'object') {
+              return {
+                text: String(row.text ?? row.line ?? row.msg ?? ''),
+                type: String(row.type || 'info'),
+              };
+            }
+            return null;
+          })
+          .filter((r) => r && r.text);
         setLiveLogs((prev) => {
           if (prev.length === next.length && prev.length > 0) {
             const a = prev[prev.length - 1];
@@ -4762,6 +4773,13 @@ function AppInner() {
         });
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') handleLogout();
+        else if (mountedRef.current) {
+          setLiveLogs((prev) => {
+            const msg = error.message || 'Log fetch failed';
+            if (prev.length === 1 && prev[0]?.text === msg) return prev;
+            return [{ text: `⚠️ ${msg}`, type: 'error' }];
+          });
+        }
       }
     },
     [handleLogout]
@@ -8211,7 +8229,11 @@ function AppInner() {
                     }
                   }}
                   ListEmptyComponent={
-                    <Text style={styles.logText}>Chargement des logs...</Text>
+                    <Text style={styles.logText}>
+                      {selectedProcess?.status === 'RUNNING'
+                        ? 'No logs yet. In Batch Manager: Kill then Start this process so logs stream here.'
+                        : 'No logs (process stopped). Start it from Batch Manager first.'}
+                    </Text>
                   }
                   keyboardShouldPersistTaps="handled"
                 />

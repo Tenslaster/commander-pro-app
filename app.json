@@ -32,6 +32,7 @@
     },
     "android": {
       "package": "com.commanderpro.radios",
+      "versionCode": 138,
       "adaptiveIcon": {
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/android-icon-foreground.png",
