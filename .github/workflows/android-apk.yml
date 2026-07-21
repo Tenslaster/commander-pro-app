@@ -1,6 +1,5 @@
-# Commander PRO 1.3.8 APK — GitHub Actions (EAS free Android quota used until Aug 1)
-# Run: Actions → Android APK 1.3.8 → Run workflow
-# Artifact: CommanderPro-apk
+# Commander PRO 1.3.8 APK without EAS (free Android quota used until ~Aug 1).
+# Actions → Android APK 1.3.8 → Run workflow → artifact CommanderPro-apk
 
 name: Android APK 1.3.8
 
@@ -40,53 +39,16 @@ jobs:
           EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
         run: npx expo prebuild --platform android --clean --no-install --non-interactive
 
-      - name: Release signing with debug keystore (sideload)
+      - name: Create debug keystore + patch release signing
         working-directory: android
         run: |
           set -euo pipefail
-          # Generate a stable debug keystore for this CI APK
           keytool -genkeypair -v -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android -keypass android \
             -alias androiddebugkey \
             -keystore app/debug.keystore \
             -dname "CN=Commander PRO,O=Crew,C=CA"
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("app/build.gradle")
-          if not p.is_file():
-              p = Path("app/build.gradle.kts")
-          text = p.read_text()
-          if p.suffix == ".kts":
-              raise SystemExit("Unexpected kotlin DSL — update workflow")
-          # Inject signingConfigs if missing
-          if "signingConfigs" not in text:
-              text = text.replace(
-                  "android {",
-                  """android {
-      signingConfigs {
-          release {
-              storeFile file('debug.keystore')
-              storePassword 'android'
-              keyAlias 'androiddebugkey'
-              keyPassword 'android'
-          }
-      }
-  """,
-                  1,
-              )
-          # Ensure release buildType uses signingConfigs.release
-          if "signingConfig signingConfigs.release" not in text:
-              text = re.sub(
-                  r"(release\s*\{)",
-                  r"\1\n            signingConfig signingConfigs.release",
-                  text,
-                  count=1,
-              )
-          p.write_text(text)
-          print("Patched", p)
-          PY
+          python3 ../scripts/ci-patch-android-signing.py
 
       - name: Gradle assembleRelease
         working-directory: android
@@ -97,15 +59,14 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Package APK as CommanderPro.apk
+      - name: Package APK
         run: |
           set -euo pipefail
           APK=$(find android -name "*.apk" \( -path "*/release/*" -o -path "*/outputs/*" \) | head -n 1)
           echo "Found $APK"
           ls -lah "$APK"
           cp "$APK" CommanderPro.apk
-          # sanity: app.config version
-          unzip -p CommanderPro.apk assets/app.config | head -c 300 || true
+          unzip -p CommanderPro.apk assets/app.config | head -c 400 || true
           echo
 
       - uses: actions/upload-artifact@v4
