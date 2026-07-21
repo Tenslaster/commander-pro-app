@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""CI helper: ensure release buildType signs with app/debug.keystore."""
+"""CI helper: ensure release buildType signs with app/debug.keystore.
+
+Expo prebuild already creates signingConfigs.debug. Older CI patches only added
+`signingConfig signingConfigs.release` without defining the release config,
+which fails with:
+  Could not get unknown property 'release' for SigningConfig container
+"""
 from __future__ import annotations
 
 import re
