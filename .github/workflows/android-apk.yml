@@ -43,11 +43,15 @@ jobs:
         working-directory: android
         run: |
           set -euo pipefail
-          keytool -genkeypair -v -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android \
-            -alias androiddebugkey \
-            -keystore app/debug.keystore \
-            -dname "CN=Commander PRO,O=Crew,C=CA"
+          if [ ! -f app/debug.keystore ]; then
+            keytool -genkeypair -v -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keystore app/debug.keystore \
+              -dname "CN=Commander PRO,O=Crew,C=CA"
+          else
+            echo "Using existing app/debug.keystore from prebuild"
+          fi
           python3 ../scripts/ci-patch-android-signing.py
 
       - name: Gradle assembleRelease
