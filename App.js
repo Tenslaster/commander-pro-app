@@ -132,7 +132,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.3.8';
+const APP_VERSION = '1.3.9';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -494,8 +494,15 @@ const extractSongNameFromBody = (body) => {
   return '';
 };
 
+/** Match RADIO1..RADIO10 (10 before 1 so RADIO10 is not truncated to RADIO1). */
+const RADIO_ID_RE = /RADIO(?:10|[1-9])/i;
+const RADIO_ID_SUFFIX_RE = /\s*[·•]\s*RADIO(?:10|[1-9])\s*$/i;
+const RADIO_ROLE_NAME_RE = /^(OWNER|RADIO(?:10|[1-9]))$/i;
+
 const isGenericSongTitle = (title) =>
-  /^(?:🎵\s*)?(?:song|chanson)(?:\s*[·•|\-]\s*RADIO[1-5])?$/i.test(String(title || '').trim());
+  /^(?:🎵\s*)?(?:song|chanson)(?:\s*[·•|\-]\s*RADIO(?:10|[1-9]))?$/i.test(
+    String(title || '').trim()
+  );
 
 /** Prefer unique song title from body (ingest often sends generic "Song · RADIO1"). */
 const formatNotifyDisplay = (item) => {
@@ -506,12 +513,12 @@ const formatNotifyDisplay = (item) => {
     let songName = extractSongNameFromBody(body);
     // Title already is the track name (new bridge) — use it when body parse fails
     if (!songName && title && !isGenericSongTitle(title)) {
-      songName = title.replace(/^🎵\s*/, '').replace(/\s*[·•]\s*RADIO[1-5]\s*$/i, '').trim();
+      songName = title.replace(/^🎵\s*/, '').replace(RADIO_ID_SUFFIX_RE, '').trim();
     }
     if (!songName) songName = (body.split('\n')[0] || title || 'Chanson').slice(0, 90);
     const station =
       item.station ||
-      (title.match(/RADIO[1-5]/i) || [])[0] ||
+      (title.match(RADIO_ID_RE) || [])[0] ||
       '';
     return {
       headline: songName,
@@ -1038,9 +1045,9 @@ const chatSpeakerKey = (msg) => {
 const chatRoleLabel = (msg) => {
   const dn = String(msg?.display_name || '').trim();
   const fu = String(msg?.from_user || '').trim();
-  // App login name first
-  if (dn && !/^(OWNER|RADIO[1-5])$/i.test(dn)) return dn;
-  if (fu && !/^(OWNER|RADIO[1-5])$/i.test(fu)) return fu;
+  // App login name first (skip station roles OWNER / RADIO1..10)
+  if (dn && !RADIO_ROLE_NAME_RE.test(dn)) return dn;
+  if (fu && !RADIO_ROLE_NAME_RE.test(fu)) return fu;
   if (dn) return dn;
   if (fu) return fu;
   return String(msg?.from || 'User').trim() || 'User';
@@ -1796,7 +1803,7 @@ function AppInner() {
   const [notifyFeedVisible, setNotifyFeedVisible] = useState(false);
   const [notifyFeed, setNotifyFeed] = useState([]);
   const [notifyFilter, setNotifyFilter] = useState('ALL');
-  /** Alerts station scope: ALL = central feed, RADIO1..5 = one radio */
+  /** Alerts station scope: ALL = central feed, RADIO1..10 = one radio */
   const [notifyStation, setNotifyStation] = useState('ALL');
   const [notifyUnread, setNotifyUnread] = useState(0);
   const [notifyLastReadTs, setNotifyLastReadTs] = useState(0);
@@ -3458,7 +3465,7 @@ function AppInner() {
     if (me && me === role && msg.from === userRoleRef.current) {
       if (!fu && !dn) return true;
       if (fu === role || dn === role) return true;
-      if (!fu && /^(owner|radio[1-5])$/i.test(dn || role)) return true;
+      if (!fu && /^(owner|radio(?:10|[1-9]))$/i.test(dn || role)) return true;
     }
     return false;
   }, []);
@@ -3497,7 +3504,7 @@ function AppInner() {
     (msg) => {
       if (!msg || msg.deleted || msg._local) return;
       // Must match bubble ownership (app username), not only station role —
-      // multiple app logins can share RADIO1…RADIO5.
+      // multiple app logins can share RADIO1…RADIO10.
       const isMine = isMyChatMessage(msg);
       const isOwnerUser = userRoleRef.current === 'OWNER';
       if (!isMine && !isOwnerUser) return;
@@ -7568,11 +7575,10 @@ function AppInner() {
                 <View style={styles.adminChipRow}>
                   {[
                     { id: 'public', label: 'Vider Général' },
-                    { id: 'dm_OWNER_RADIO1', label: 'Vider DM R1' },
-                    { id: 'dm_OWNER_RADIO2', label: 'Vider DM R2' },
-                    { id: 'dm_OWNER_RADIO3', label: 'Vider DM R3' },
-                    { id: 'dm_OWNER_RADIO4', label: 'Vider DM R4' },
-                    { id: 'dm_OWNER_RADIO5', label: 'Vider DM R5' },
+                    ...STATION_IDS.map((st) => ({
+                      id: `dm_OWNER_${st}`,
+                      label: `Vider DM ${st.replace('RADIO', 'R')}`,
+                    })),
                   ].map((c) => (
                     <TouchableOpacity
                       key={c.id}
@@ -7794,7 +7800,7 @@ function AppInner() {
                   Kick sessions par rôle (vous restez connecté)
                 </Text>
                 <View style={styles.adminChipRow}>
-                  {['RADIO1', 'RADIO2', 'RADIO3', 'RADIO4', 'RADIO5'].map((r) => (
+                  {STATION_IDS.map((r) => (
                     <TouchableOpacity
                       key={r}
                       style={styles.adminChip}
@@ -7814,7 +7820,9 @@ function AppInner() {
                         }
                       }}
                     >
-                      <Text style={styles.adminChipText}>Kick {r}</Text>
+                      <Text style={styles.adminChipText}>
+                        Kick {r.replace('RADIO', 'R')}
+                      </Text>
                     </TouchableOpacity>
                   ))}
                   <TouchableOpacity
