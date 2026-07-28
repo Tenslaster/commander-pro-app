@@ -42,6 +42,13 @@ import {
   stopBackgroundNotifyFetch,
   pollNotifyOnceInBackground,
 } from './notificationBackground';
+import {
+  cacheGet,
+  cacheSet,
+  cacheClearAll,
+  cachePeek,
+  cacheUsable,
+} from './appCache';
 
 /**
  * Runtime client:
@@ -132,7 +139,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.3.9';
+const APP_VERSION = '1.4.0';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -1651,9 +1658,14 @@ const UserRow = React.memo(
               </View>
             ) : null}
           </View>
-          <Text style={styles.userRowMeta} numberOfLines={1}>
+          <Text style={styles.userRowMeta} numberOfLines={2}>
             💰 {item.bank ?? 0} · tips {item.gold_tipped ?? 0} · songs{' '}
-            {item.songs_played ?? 0} · {item.room_time || '0m'}
+            {item.songs_played ?? 0}
+            {(item.gold_transferred_out || item.gold_transferred_in)
+              ? ` · ⇄ out ${item.gold_transferred_out ?? 0} / in ${item.gold_transferred_in ?? 0}`
+              : ''}
+            {' · '}
+            {item.room_time || '0m'}
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={18} color="#475569" />
@@ -1671,6 +1683,8 @@ const UserRow = React.memo(
     a.item?.station === b.item?.station &&
     a.item?.songs_played === b.item?.songs_played &&
     a.item?.gold_tipped === b.item?.gold_tipped &&
+    a.item?.gold_transferred_out === b.item?.gold_transferred_out &&
+    a.item?.gold_transferred_in === b.item?.gold_transferred_in &&
     a.item?.room_time === b.item?.room_time
 );
 
@@ -1810,7 +1824,7 @@ function AppInner() {
   const [notifyLoading, setNotifyLoading] = useState(false);
 
   // Real user chat (public + private Owner↔Radio) — Discord replacement
-  const [mainTab, setMainTab] = useState('radios'); // radios | users | chat | alerts | manage | security
+  const [mainTab, setMainTab] = useState('radios'); // radios | users | stats | chat | alerts | manage | security
   // OWNER security console
   const [securityData, setSecurityData] = useState(null);
   const [securityLoading, setSecurityLoading] = useState(false);
@@ -1851,6 +1865,13 @@ function AppInner() {
   const [playlistDownload, setPlaylistDownload] = useState(null); // server download status
   const playlistInflightRef = useRef(false);
   const playlistDlAnnouncedRef = useRef('');
+
+  // Station stats (tips / songs day-week-month)
+  const [statsStation, setStatsStation] = useState('RADIO1');
+  const [statsPeriod, setStatsPeriod] = useState('day'); // day | week | month
+  const [statsPayload, setStatsPayload] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const statsInflightRef = useRef(false);
 
   // Management tab — APP login accounts (not Highrise room users)
   const [appUsersList, setAppUsersList] = useState([]);
@@ -1976,6 +1997,9 @@ function AppInner() {
   const canAlerts = isOwner || isMasterLogin || hasPerm('alerts');
   const canUsersTab = isOwner || isMasterLogin || hasPerm('users');
   const canUsersEdit = isOwner || isMasterLogin || hasPerm('users_edit');
+  // Stats: status viewers + users tab + owner (radio sees own station only)
+  const canStatsTab =
+    isOwner || isMasterLogin || hasPerm('status') || hasPerm('users');
   // playlist right, or legacy control (operators already had control before playlist perm)
   const canPlaylist =
     isOwner || isMasterLogin || hasPerm('playlist') || hasPerm('control');
@@ -2076,6 +2100,7 @@ function AppInner() {
     deviceRegisteredRef.current = false;
     loginInflightRef.current = false;
     stopBackgroundNotifyFetch().catch(() => {});
+    cacheClearAll().catch(() => {});
     try {
       await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
       await SecureStore.deleteItemAsync(SESSION_ROLE_KEY);
@@ -2363,6 +2388,7 @@ function AppInner() {
         setUsersStation(role);
         setManageStation(role);
         setPlaylistStation(role);
+        setStatsStation(role);
       }
       setBiometricGate(false);
       pendingSessionRef.current = null;
@@ -2372,6 +2398,33 @@ function AppInner() {
         pushOkRef.current = false;
       }
       authTokenRef.current = token;
+      // Hydrate UI from disk cache (stale-while-revalidate) — instant paint after unlock
+      (async () => {
+        try {
+          const st = await cacheGet('status', '');
+          if (cacheUsable(st) && Array.isArray(st.data) && st.data.length && mountedRef.current) {
+            setProcesses((prev) => (prev?.length ? prev : st.data));
+            setStatusLoaded(true);
+          }
+          const stationForCache =
+            role && role !== 'OWNER' && STATION_IDS.includes(role) ? role : 'RADIO1';
+          const statsHit = await cacheGet('stats', stationForCache);
+          if (cacheUsable(statsHit) && statsHit.data && mountedRef.current) {
+            setStatsPayload(statsHit.data);
+          }
+          const usersHit = await cacheGet('users', stationForCache);
+          if (cacheUsable(usersHit) && Array.isArray(usersHit.data) && mountedRef.current) {
+            setUsersList(usersHit.data);
+            usersLoadedStationRef.current = stationForCache;
+          }
+          const notifyHit = await cacheGet('notify', '');
+          if (cacheUsable(notifyHit) && Array.isArray(notifyHit.data) && mountedRef.current) {
+            setNotifyFeed(notifyHit.data);
+          }
+        } catch {
+          /* ignore cache hydrate errors */
+        }
+      })();
       if (registerPush && !IS_EXPO_GO) {
         clearPushTimers();
         // Delay so UI settles; cancel on logout via pushTimersRef
@@ -2917,6 +2970,7 @@ function AppInner() {
         setStatusLoaded((prev) => (prev ? prev : true));
         netFailCountRef.current = 0;
         setConnectionOk((prev) => (prev ? prev : true));
+        cacheSet('status', '', procArray).catch(() => {});
         const ms = Date.now() - t0;
         lastSyncAtRef.current = Date.now();
         // Throttle latency header updates (avoid re-render every poll for ±few ms)
@@ -2929,6 +2983,23 @@ function AppInner() {
           setLatencyMs(ms);
         }
       } catch (error) {
+        // Offline / failed poll: keep last good snapshot from cache if UI empty
+        try {
+          const peek = cachePeek('status', '');
+          if (
+            cacheUsable(peek) &&
+            Array.isArray(peek.data) &&
+            peek.data.length &&
+            mountedRef.current
+          ) {
+            setProcesses((prev) =>
+              prev?.length ? prev : mergeProcessList([], peek.data)
+            );
+            setStatusLoaded(true);
+          }
+        } catch {
+          /* ignore */
+        }
         if (error.code === 'FORCE_UPDATE') {
           applyForceUpdatePolicy(
             error.policy || { force_update: true, min_app_version: '999.0.0' }
@@ -3097,7 +3168,8 @@ function AppInner() {
           if (prev.length === 0 && items.length === 0) return prev;
           return items;
         });
-        // Alerts permanence is on the server (notification_feed.json) — not SecureStore
+        // Client cache for instant Alerts tab (server remains source of truth)
+        cacheSet('notify', '', items).catch(() => {});
 
         const lastRead = notifyLastReadRef.current || 0;
         const unread = items.filter((it) => Number(it.ts) > lastRead).length;
@@ -3769,6 +3841,13 @@ function AppInner() {
     return playlistStation;
   }, [userRole, playlistStation]);
 
+  /** Active station for Stats tab */
+  const effectiveStatsStation = useMemo(() => {
+    const role = userRole || '';
+    if (role && role !== 'OWNER' && STATION_IDS.includes(role)) return role;
+    return statsStation;
+  }, [userRole, statsStation]);
+
   const switchPlaylistStation = useCallback(
     (st) => {
       if (!isOwner) return;
@@ -3779,6 +3858,72 @@ function AppInner() {
       setPlaylistStation(st);
     },
     [isOwner, playlistStation]
+  );
+
+  const switchStatsStation = useCallback(
+    (st) => {
+      if (!isOwner) return;
+      if (!STATION_IDS.includes(st) || st === statsStation) return;
+      setStatsStation(st);
+      // Instant paint from cache when switching R1…R10
+      const peek = cachePeek('stats', st);
+      if (cacheUsable(peek) && peek.data) setStatsPayload(peek.data);
+    },
+    [isOwner, statsStation]
+  );
+
+  const fetchStationStats = useCallback(
+    async ({ silent = true } = {}) => {
+      const token = authTokenRef.current;
+      if (!token || !canStatsTab) return;
+      if (silent && statsInflightRef.current) return;
+      statsInflightRef.current = true;
+      const role = userRoleRef.current || '';
+      const station =
+        role === 'OWNER'
+          ? statsStation
+          : STATION_IDS.includes(role)
+            ? role
+            : statsStation;
+      if (!station || !STATION_IDS.includes(station)) {
+        statsInflightRef.current = false;
+        return;
+      }
+      // Paint cached stats immediately (tab switch / offline)
+      try {
+        const cached = await cacheGet('stats', station);
+        if (cacheUsable(cached) && cached.data && mountedRef.current) {
+          setStatsPayload(cached.data);
+          if (!silent && !cached.stale) setStatsLoading(false);
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!silent) setStatsLoading(true);
+      try {
+        const data = await apiFetch(
+          `/station_stats?station=${encodeURIComponent(station)}`,
+          { token }
+        );
+        if (mountedRef.current) {
+          const payload = data && typeof data === 'object' ? data : null;
+          setStatsPayload(payload);
+          if (payload) cacheSet('stats', station, payload).catch(() => {});
+        }
+      } catch (error) {
+        if (error.code === 'UNAUTHORIZED') handleLogout();
+        else if (!silent) {
+          const peek = cachePeek('stats', station);
+          if (!cacheUsable(peek)) {
+            showBanner(error.message || 'Stats failed', 'warn');
+          }
+        }
+      } finally {
+        statsInflightRef.current = false;
+        if (mountedRef.current && !silent) setStatsLoading(false);
+      }
+    },
+    [canStatsTab, statsStation, handleLogout, showBanner]
   );
 
   const fetchPlaylist = useCallback(
@@ -3798,6 +3943,16 @@ function AppInner() {
         playlistInflightRef.current = false;
         return;
       }
+      try {
+        const cached = await cacheGet('playlist', station);
+        if (cacheUsable(cached) && cached.data && mountedRef.current) {
+          const songs = Array.isArray(cached.data.songs) ? cached.data.songs : [];
+          if (songs.length) setPlaylistSongs(songs);
+          if (cached.data.download != null) setPlaylistDownload(cached.data.download);
+        }
+      } catch {
+        /* ignore */
+      }
       if (!silent && mountedRef.current) setPlaylistLoading(true);
       try {
         const data = await apiFetch(
@@ -3807,8 +3962,13 @@ function AppInner() {
         if (!mountedRef.current) return;
         const returned = data?.station || station;
         if (role === 'OWNER' && returned !== playlistStation) return;
-        setPlaylistSongs(Array.isArray(data?.songs) ? data.songs : []);
+        const songs = Array.isArray(data?.songs) ? data.songs : [];
+        setPlaylistSongs(songs);
         setPlaylistDownload(data?.download || null);
+        cacheSet('playlist', returned || station, {
+          songs,
+          download: data?.download || null,
+        }).catch(() => {});
         if (role !== 'OWNER' && returned) setPlaylistStation(returned);
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
@@ -4012,6 +4172,21 @@ function AppInner() {
         setUsersSearchHits(null);
       }
 
+      try {
+        const cached = await cacheGet('users', station);
+        if (
+          cacheUsable(cached) &&
+          Array.isArray(cached.data) &&
+          cached.data.length &&
+          mountedRef.current &&
+          gen === usersFetchGenRef.current
+        ) {
+          setUsersList(cached.data);
+          usersLoadedStationRef.current = station;
+        }
+      } catch {
+        /* ignore */
+      }
       if (!silent && mountedRef.current) setUsersLoading(true);
       try {
         const data = await apiFetch(
@@ -4029,8 +4204,10 @@ function AppInner() {
         if (returned !== expected) return;
 
         const list = Array.isArray(data?.users) ? data.users : [];
-        setUsersList(list.map((u) => normalizeUserRow(u, returned)));
+        const rows = list.map((u) => normalizeUserRow(u, returned));
+        setUsersList(rows);
         usersLoadedStationRef.current = returned;
+        cacheSet('users', returned, rows).catch(() => {});
         if (role !== 'OWNER' && returned) setUsersStation(returned);
       } catch (error) {
         if (error?.name === 'AbortError' || error?.code === 'ABORT') return;
@@ -4039,7 +4216,10 @@ function AppInner() {
           return;
         }
         if (!silent && appStateRef.current === 'active') {
-          Alert.alert('Utilisateurs', error.message || 'Chargement impossible.');
+          const peek = cachePeek('users', station);
+          if (!cacheUsable(peek)) {
+            Alert.alert('Utilisateurs', error.message || 'Chargement impossible.');
+          }
         }
       } finally {
         if (mountedRef.current && gen === usersFetchGenRef.current) {
@@ -5591,14 +5771,22 @@ function AppInner() {
   // Never leave mainTab in an unknown / unauthorized state (blank UI or push deep-link)
   useEffect(() => {
     if (
-      !['radios', 'users', 'chat', 'alerts', 'playlist', 'manage', 'security'].includes(
-        mainTab
-      )
+      ![
+        'radios',
+        'users',
+        'stats',
+        'chat',
+        'alerts',
+        'playlist',
+        'manage',
+        'security',
+      ].includes(mainTab)
     ) {
       setMainTab('radios');
       return;
     }
     if (mainTab === 'users' && !canUsersTab) setMainTab('radios');
+    else if (mainTab === 'stats' && !canStatsTab) setMainTab('radios');
     else if (mainTab === 'chat' && !canChat) setMainTab('radios');
     else if (mainTab === 'alerts' && !canAlerts) setMainTab('radios');
     else if (mainTab === 'playlist' && !canPlaylist) setMainTab('radios');
@@ -5607,12 +5795,21 @@ function AppInner() {
   }, [
     mainTab,
     canUsersTab,
+    canStatsTab,
     canChat,
     canAlerts,
     canPlaylist,
     canManageAppUsers,
     isOwner,
   ]);
+
+  // Stats tab: load when opened / station changes
+  useEffect(() => {
+    if (!isUnlocked || mainTab !== 'stats' || !canStatsTab) return undefined;
+    fetchStationStats({ silent: false });
+    const id = setInterval(() => fetchStationStats({ silent: true }), 45000);
+    return () => clearInterval(id);
+  }, [isUnlocked, mainTab, canStatsTab, effectiveStatsStation, fetchStationStats]);
 
   // Security tab: poll only while visible (smooth + low load)
   useEffect(() => {
@@ -5833,6 +6030,7 @@ function AppInner() {
   const safeMainTab = [
     'radios',
     'users',
+    'stats',
     'chat',
     'alerts',
     'playlist',
@@ -5861,17 +6059,19 @@ function AppInner() {
                   ? t('tab.alerts')
                   : safeMainTab === 'users'
                     ? t('tab.users')
-                    : safeMainTab === 'playlist'
-                      ? t('tab.playlist')
-                      : safeMainTab === 'security'
-                        ? t('nav.security')
-                      : safeMainTab === 'manage'
-                        ? t('tab.manage')
-                        : (
-                          <>
-                            Commander<Text style={{ color: '#f8fafc' }}> PRO</Text>
-                          </>
-                        )}
+                    : safeMainTab === 'stats'
+                      ? t('tab.stats')
+                      : safeMainTab === 'playlist'
+                        ? t('tab.playlist')
+                        : safeMainTab === 'security'
+                          ? t('nav.security')
+                        : safeMainTab === 'manage'
+                          ? t('tab.manage')
+                          : (
+                            <>
+                              Commander<Text style={{ color: '#f8fafc' }}> PRO</Text>
+                            </>
+                          )}
             </Text>
             <View style={styles.headerBadgeRow}>
               <View
@@ -5891,6 +6091,7 @@ function AppInner() {
                 {!connectionOk ? ` · ${t('header.offline')}` : ''}
                 {safeMainTab === 'chat' ? ` · ${t('header.chat')}` : ''}
                 {safeMainTab === 'users' ? ` · ${effectiveUsersStation}` : ''}
+                {safeMainTab === 'stats' ? ` · ${effectiveStatsStation}` : ''}
                 {safeMainTab === 'playlist' ? ` · ${effectivePlaylistStation}` : ''}
                 {safeMainTab === 'manage' ? ` · ${t('nav.manage')}` : ''}
                 {safeMainTab === 'security' ? ` · ${t('nav.security')}` : ''}
@@ -6358,6 +6559,187 @@ function AppInner() {
                 />
               }
             />
+          </View>
+        ) : null}
+
+        {/* ===== TAB: STATS (tips / songs day-week-month) ===== */}
+        {safeMainTab === 'stats' ? (
+          <View style={styles.tabBody}>
+            {!canStatsTab ? (
+              <View style={[styles.emptyWrap, { flex: 1 }]}>
+                <Text style={styles.emptyText}>{t('stats.noAccess')}</Text>
+              </View>
+            ) : (
+              <ScrollView
+                style={styles.flex}
+                contentContainerStyle={[
+                  styles.tabListContent,
+                  { paddingBottom: tabPadBottom + 16 },
+                ]}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={statsLoading}
+                    onRefresh={() => fetchStationStats({ silent: false })}
+                    tintColor="#22d3ee"
+                    colors={['#22d3ee']}
+                  />
+                }
+              >
+                <Text style={styles.panelTitle}>{t('stats.title')}</Text>
+                <Text style={styles.metaLine}>
+                  {isOwner ? t('stats.subtitleOwner') : t('stats.subtitleRadio')}
+                  {statsPayload?.stats?.as_of
+                    ? ` · ${statsPayload.stats.as_of}`
+                    : ''}
+                </Text>
+
+                {isOwner ? (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.notifyFilterRow}
+                    style={{ marginVertical: 8 }}
+                  >
+                    {STATION_IDS.map((st) => (
+                      <Chip
+                        key={`stats-${st}`}
+                        label={st.replace('RADIO', 'R')}
+                        color={ROLE_COLORS[st] || '#22d3ee'}
+                        active={effectiveStatsStation === st}
+                        onPress={() => switchStatsStation(st)}
+                      />
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <View style={styles.manageStationLock}>
+                    <Ionicons
+                      name="radio"
+                      size={16}
+                      color={ROLE_COLORS[effectiveStatsStation] || '#22d3ee'}
+                    />
+                    <Text
+                      style={[
+                        styles.manageStationLockText,
+                        { color: ROLE_COLORS[effectiveStatsStation] || '#22d3ee' },
+                      ]}
+                    >
+                      {effectiveStatsStation}
+                    </Text>
+                  </View>
+                )}
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.notifyFilterRow}
+                  style={{ marginBottom: 12 }}
+                >
+                  {[
+                    { id: 'day', key: 'stats.period.day' },
+                    { id: 'week', key: 'stats.period.week' },
+                    { id: 'month', key: 'stats.period.month' },
+                  ].map((p) => (
+                    <Chip
+                      key={p.id}
+                      label={t(p.key)}
+                      color="#22d3ee"
+                      active={statsPeriod === p.id}
+                      onPress={() => setStatsPeriod(p.id)}
+                    />
+                  ))}
+                </ScrollView>
+
+                {statsLoading && !statsPayload ? (
+                  <ActivityIndicator color="#22d3ee" style={{ marginTop: 24 }} />
+                ) : null}
+
+                {(() => {
+                  const s = statsPayload?.stats?.[statsPeriod] || {};
+                  const life = statsPayload?.stats?.lifetime || {};
+                  const pctLabel = (v) => {
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '—';
+                    const sign = n > 0 ? '+' : '';
+                    return `${sign}${n}%`;
+                  };
+                  const pctColor = (v) => {
+                    const n = Number(v);
+                    if (!Number.isFinite(n) || n === 0) return '#94a3b8';
+                    return n > 0 ? '#34d399' : '#f87171';
+                  };
+                  const cards = [
+                    {
+                      label: t('stats.tipsGold'),
+                      value: s.tips_gold ?? 0,
+                      pct: s.pct_tips_gold,
+                      color: '#fbbf24',
+                    },
+                    {
+                      label: t('stats.tipsCount'),
+                      value: s.tips_count ?? 0,
+                      pct: s.pct_tips_count,
+                      color: '#fb923c',
+                    },
+                    {
+                      label: t('stats.songs'),
+                      value: s.songs ?? 0,
+                      pct: s.pct_songs,
+                      color: '#a78bfa',
+                    },
+                    {
+                      label: t('stats.transfers'),
+                      value: s.transfers_count ?? 0,
+                      pct: s.pct_transfers_count,
+                      color: '#38bdf8',
+                    },
+                    {
+                      label: t('stats.transfersGold'),
+                      value: s.transfers_gold ?? 0,
+                      pct: s.pct_transfers_gold,
+                      color: '#22d3ee',
+                    },
+                  ];
+                  return (
+                    <>
+                      <View style={styles.statsGrid}>
+                        {cards.map((c) => (
+                          <View
+                            key={c.label}
+                            style={[
+                              styles.statsCard,
+                              { borderColor: `${c.color}55` },
+                            ]}
+                          >
+                            <Text style={styles.statsCardLabel}>{c.label}</Text>
+                            <Text style={[styles.statsCardValue, { color: c.color }]}>
+                              {c.value}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.statsCardPct,
+                                { color: pctColor(c.pct) },
+                              ]}
+                            >
+                              {pctLabel(c.pct)} {t('stats.vsPrev')}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                      <View style={styles.statsLifetimeBox}>
+                        <Text style={styles.statsCardLabel}>{t('stats.lifetime')}</Text>
+                        <Text style={styles.metaLine}>
+                          {t('stats.tipsGold')}: {life.tips_gold ?? 0} ·{' '}
+                          {t('stats.songs')}: {life.songs ?? 0}
+                        </Text>
+                        <Text style={[styles.metaLine, { marginTop: 6, fontSize: 11 }]}>
+                          {t('stats.note')}
+                        </Text>
+                      </View>
+                    </>
+                  );
+                })()}
+              </ScrollView>
+            )}
           </View>
         ) : null}
 
@@ -7333,6 +7715,19 @@ function AppInner() {
                 color="#a78bfa"
                 label={t('nav.users')}
                 onPress={() => switchMainTab('users')}
+              />
+            ) : null}
+            {canStatsTab ? (
+              <BottomNavItem
+                active={safeMainTab === 'stats'}
+                icon="stats-chart-outline"
+                iconActive="stats-chart"
+                color="#22d3ee"
+                label={t('nav.stats')}
+                onPress={() => {
+                  switchMainTab('stats');
+                  fetchStationStats({ silent: false });
+                }}
               />
             ) : null}
             {canChat ? (
@@ -8427,6 +8822,15 @@ function AppInner() {
                   {[
                     ['Tips (gold)', selectedStationUser?.gold_tipped ?? 0],
                     ['Chansons', selectedStationUser?.songs_played ?? 0],
+                    ['Bank', selectedStationUser?.bank ?? 0],
+                    [
+                      'Transfert sortant',
+                      selectedStationUser?.gold_transferred_out ?? 0,
+                    ],
+                    [
+                      'Transfert reçu',
+                      selectedStationUser?.gold_transferred_in ?? 0,
+                    ],
                     ['Temps en salle', selectedStationUser?.room_time || '0m'],
                     ['Crédit net', selectedStationUser?.net_credit ?? 0],
                     ['Skips', selectedStationUser?.songs_skipped ?? 0],
@@ -8931,6 +9335,44 @@ const styles = StyleSheet.create({
   },
   ownerAlertsActions: { gap: 8, alignItems: 'center', paddingRight: 4 },
 
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 4,
+  },
+  statsCard: {
+    width: '47%',
+    backgroundColor: 'rgba(15,23,42,0.85)',
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 12,
+    minHeight: 96,
+  },
+  statsCardLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  statsCardValue: {
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+  },
+  statsCardPct: {
+    marginTop: 6,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  statsLifetimeBox: {
+    marginTop: 16,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: 'rgba(15,23,42,0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(34,211,238,0.25)',
+  },
   bottomNav: {
     position: 'absolute',
     left: 0,
