@@ -70,26 +70,26 @@ import {
 } from './smartPoll';
 
 /**
- * Runtime client:
- * - Expo Go  → testing (in-app feed + local OS banners under Expo Go)
- * - Standalone APK/IPA → real remote push under app name "Commander PRO"
+ * Runtime client (production = standalone APK / IPA only).
+ * Expo Go is optional personal testing — never the shipping product.
  */
 const IS_EXPO_GO =
   Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
   Constants.appOwnership === 'expo';
+/** True for APK/IPA / dev-client release builds (what end users install). */
 const IS_STANDALONE =
   !IS_EXPO_GO &&
   (Constants.executionEnvironment === ExecutionEnvironment.Standalone ||
     Constants.executionEnvironment === ExecutionEnvironment.Bare ||
     Constants.appOwnership === 'standalone' ||
-    // EAS production / preview builds
+    // EAS / GitHub release builds often omit appOwnership
     !Constants.appOwnership);
 /** Push channel id — must match server `channelId` for Android APK */
 const NOTIF_CHANNEL_MAIN = 'commander-pro';
 const NOTIF_CHANNEL_CHAT = 'commander-pro-chat';
 const NOTIF_CHANNEL_DEFAULT = 'default';
 
-// Show banners in foreground for both Expo Go and standalone builds
+// Foreground banners for standalone APK/IPA (and Expo Go while testing)
 try {
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
@@ -103,10 +103,11 @@ try {
   /* ignore */
 }
 
-/** Android notification channels (Expo Go + APK). APK uses branded name. */
+/** Android notification channels — branded for production APK */
 async function setupAndroidNotificationChannels() {
   if (Platform.OS !== 'android') return;
-  const mainName = IS_EXPO_GO ? 'Commander PRO (test)' : 'Commander PRO';
+  // Production branding; Expo Go test builds can still use the same channels
+  const mainName = 'Commander PRO';
   const common = {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 250, 250, 250],
@@ -119,17 +120,14 @@ async function setupAndroidNotificationChannels() {
     await Notifications.setNotificationChannelAsync(NOTIF_CHANNEL_MAIN, {
       ...common,
       name: mainName,
-      description: IS_EXPO_GO
-        ? 'Alerts while testing in Expo Go'
-        : 'Alerts, status and admin notifications',
+      description: 'Alerts, status and admin notifications',
     });
     await Notifications.setNotificationChannelAsync(NOTIF_CHANNEL_CHAT, {
       ...common,
-      name: IS_EXPO_GO ? 'Chat (test)' : 'Commander PRO Chat',
+      name: 'Commander PRO Chat',
       description: 'Chat messages',
       importance: Notifications.AndroidImportance.HIGH,
     });
-    // Fallback channel used by some Expo payloads
     await Notifications.setNotificationChannelAsync(NOTIF_CHANNEL_DEFAULT, {
       ...common,
       name: mainName,
@@ -140,14 +138,14 @@ async function setupAndroidNotificationChannels() {
 }
 setupAndroidNotificationChannels();
 
-// Production default baked in so EAS APK/IPA work even when .env is gitignored.
-// Override locally with EXPO_PUBLIC_API_URL in .env if needed.
+// Production default baked in so APK/IPA work even when .env is gitignored.
+// Override locally with EXPO_PUBLIC_API_URL in .env if needed (Expo Go testing).
 const DEFAULT_API_URL = 'https://crew.kingdom.forum/api';
 const _rawApiUrl = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
-// Production standalone must use HTTPS (rooted proxies / MITM on cleartext)
+// Standalone APK/IPA must use HTTPS (no cleartext). Expo Go testing may hit local IP.
 const API_URL = (() => {
   const check = assertSecureApiUrl(_rawApiUrl);
-  if (!check.ok && !IS_EXPO_GO) {
+  if (!check.ok && IS_STANDALONE) {
     return DEFAULT_API_URL;
   }
   return _rawApiUrl;

@@ -1,7 +1,6 @@
-# Commander PRO APK (GitHub Actions — no EAS free Android quota)
-# Actions → Android APK → Run workflow → artifact CommanderPro-apk
-#
-# Action majors pin Node 24 runtimes (avoids "Node.js 20 is deprecated" warnings).
+# Commander PRO — production Android APK (standalone, not Expo Go)
+# GitHub Actions (EAS free Android quota is often exhausted).
+# Node-24 action majors avoid "Node.js 20 is deprecated" CI noise.
 
 name: Android APK
 
@@ -26,23 +25,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # v4 runs on Node 24 (v3 still targets Node 20 → yellow deprecation banner)
       - uses: android-actions/setup-android@v4
 
-      - name: Install SDK packages (match Expo compileSdk 36)
+      - name: Install SDK packages (Expo 54 → compileSdk 36)
         run: |
           set -euo pipefail
-          # Expo 54 prebuild currently targets compileSdk/targetSdk 36
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
           yes | sdkmanager --licenses || true
 
       - name: Install npm deps
-        run: npm ci --no-fund --no-audit
+        run: npm ci --no-fund --no-audit --loglevel=error
 
-      - name: Expo prebuild Android
+      - name: Expo prebuild Android (production)
         env:
           EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
-        run: npx expo prebuild --platform android --clean --no-install --non-interactive
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          echo "version=$(node -p "require('./app.json').expo.version")"
+          echo "versionCode=$(node -p "require('./app.json').expo.android.versionCode")"
+          npx expo prebuild --platform android --clean --no-install --non-interactive
 
       - name: Create debug keystore + patch release signing
         working-directory: android
@@ -59,7 +61,7 @@ jobs:
           fi
           python3 ../scripts/ci-patch-android-signing.py
 
-      - name: Gradle assembleRelease
+      - name: Gradle assembleRelease (standalone APK)
         working-directory: android
         env:
           EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
@@ -67,8 +69,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          # --warning-mode none: dependency (Expo/RN) deprecations are not fixable in our scripts
-          ./gradlew assembleRelease --no-daemon --warning-mode none
+          # Quiet Expo/RN upstream Kotlin deprecation spam (not fixable in app source)
+          ./gradlew assembleRelease --no-daemon --warning-mode none \
+            -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
       - name: Package APK
         run: |
@@ -77,10 +80,10 @@ jobs:
           echo "Found $APK"
           ls -lah "$APK"
           cp "$APK" CommanderPro.apk
-          unzip -p CommanderPro.apk assets/app.config | head -c 400 || true
+          echo "--- embedded app.config (version check) ---"
+          unzip -p CommanderPro.apk assets/app.config 2>/dev/null | head -c 500 || true
           echo
 
-      # v6+ defaults to Node 24 (v5 still emitted Node 20 deprecation banners)
       - uses: actions/upload-artifact@v6
         with:
           name: CommanderPro-apk

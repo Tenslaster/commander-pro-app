@@ -84,16 +84,19 @@ jobs:
             npm install --no-fund --no-audit
           fi
 
-      - name: Expo prebuild (generate ios/ native project)
+      - name: Expo prebuild iOS (production standalone — not Expo Go)
         if: steps.detect.outputs.type == 'expo'
         env:
           EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
           NODE_ENV: production
+          # Let Expo drive CocoaPods (avoids bare `pod install` deprecation notice path)
+          CI: 'true'
         run: |
           set -euo pipefail
           echo "EXPO_PUBLIC_API_URL=$EXPO_PUBLIC_API_URL"
           echo "app version: $(node -p "require('./app.json').expo.version")"
-          npx expo prebuild --platform ios --clean --non-interactive --no-install
+          # Without --no-install Expo runs the recommended pod install flow
+          npx expo prebuild --platform ios --clean --non-interactive
           if [ ! -d "ios" ]; then
             echo "ERROR: expo prebuild did not create ios/"
             exit 1
@@ -163,17 +166,13 @@ jobs:
           WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
           PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1 || true)
 
-          if [ -f "Podfile" ]; then
-            echo "Installing CocoaPods via npx pod-install (RN-recommended; avoids bare pod install deprecation)..."
-            # Prefer repo-local pod-install; fall back to cocoapods
-            if npx --yes pod-install 2>/dev/null; then
-              echo "pod-install OK"
-            else
-              echo "pod-install fallback → pod install"
-              pod install
-            fi
-            WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
+          # Pods should already be installed by `expo prebuild` (no --no-install).
+          # Only re-run if Pods missing (cache restore edge case).
+          if [ -f "Podfile" ] && [ ! -d "Pods" ]; then
+            echo "Pods missing — installing via Expo (npx pod-install)..."
+            npx --yes pod-install || pod install
           fi
+          WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
 
           if [ -z "${SCHEME:-}" ]; then
             if [ -n "${WORKSPACE:-}" ]; then

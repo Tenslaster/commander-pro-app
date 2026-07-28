@@ -1,6 +1,6 @@
 {
   "name": "iphone-batch-manager",
-  "version": "1.0.0",
+  "version": "1.4.2",
   "main": "index.js",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -20,11 +20,11 @@
     "react-native-safe-area-context": "~5.6.0"
   },
   "scripts": {
-    "start": "expo start --tunnel --go",
-    "start:tunnel": "expo start --tunnel --go",
-    "start:clear": "expo start --tunnel --go --clear",
-    "android": "expo start --tunnel --go --android",
-    "ios": "expo start --tunnel --go --ios",
+    "start": "expo start --dev-client",
+    "start:go": "expo start --tunnel --go",
+    "start:go:clear": "expo start --tunnel --go --clear",
+    "android": "expo start --dev-client --android",
+    "ios": "expo start --dev-client --ios",
     "web": "expo start --web",
     "build:apk": "eas build -p android --profile apk --non-interactive"
   },
