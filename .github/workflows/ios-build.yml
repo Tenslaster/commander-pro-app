@@ -1,3 +1,7 @@
+# Commander PRO IPA (GitHub Actions — unsigned; sign locally with Sideloadly)
+# Bumps action majors to Node 24 runtimes (avoids "Node.js 20 is deprecated" noise).
+# Expo prebuild + Release xcodebuild with production minify for smaller/faster JS.
+
 name: iOS Build
 
 on:
@@ -8,39 +12,35 @@ on:
         required: true
         type: string
       ios_path:
-        description: 'Path to iOS project (e.g., "ios" for React Native)'
+        description: 'Path to iOS project (Expo prebuild uses ios/)'
         required: false
         type: string
-        default: '.'
+        default: 'ios'
       scheme:
-        description: 'Xcode scheme to build (auto-detected if empty)'
+        description: 'Xcode scheme (auto from workspace if empty)'
         required: false
         type: string
         default: ''
       use_signing:
-        description: 'Enable code signing (requires secrets to be configured)'
+        description: 'Enable code signing (requires secrets)'
         required: false
         type: boolean
         default: false
       configuration:
-        description: 'Build configuration (Debug is faster, Release for production)'
+        description: 'Debug is faster; Release for production IPA'
         required: false
         type: string
-        default: 'Debug'
-      flutter_version:
-        description: 'Flutter version to use (e.g., 3.24.0). Empty means latest stable.'
-        required: false
-        type: string
-        default: ''
+        default: 'Release'
 
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
+      # Node-24-native action majors (same approach as Android APK workflow)
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -48,20 +48,18 @@ jobs:
           xcode-version: latest-stable
 
       - name: Restore DerivedData cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         id: cache-deriveddata
         with:
           path: DerivedData
-          key: deriveddata-${{ github.run_id }}
+          key: deriveddata-ios-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json') }}
           restore-keys: |
-            deriveddata-
+            deriveddata-ios-${{ runner.os }}-
 
       - name: Detect project type
         id: detect
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            echo "type=flutter" >> $GITHUB_OUTPUT
-          elif [ -f "package.json" ] && grep -q '"expo"' package.json; then
+          if [ -f "package.json" ] && grep -q '"expo"' package.json; then
             echo "type=expo" >> $GITHUB_OUTPUT
           elif [ -f "package.json" ] && grep -q '"react-native"' package.json; then
             echo "type=reactnative" >> $GITHUB_OUTPUT
@@ -69,66 +67,49 @@ jobs:
             echo "type=native" >> $GITHUB_OUTPUT
           fi
 
-      - name: Setup Flutter
-        if: steps.detect.outputs.type == 'flutter'
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ inputs.flutter_version || '' }}
-          channel: ${{ inputs.flutter_version && 'stable' || 'stable' }}
-          cache: true
-
-      - name: Flutter pub get
-        if: steps.detect.outputs.type == 'flutter'
-        run: flutter pub get
-
       - name: Setup Node.js
         if: steps.detect.outputs.type == 'reactnative' || steps.detect.outputs.type == 'expo'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
-
-      - name: Restore node_modules cache
-        if: steps.detect.outputs.type == 'reactnative' || steps.detect.outputs.type == 'expo'
-        uses: actions/cache@v4
-        id: node-modules-cache
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json', 'yarn.lock') }}
-          restore-keys: |
-            node-modules-${{ runner.os }}-
+          node-version: 24
+          cache: npm
 
       - name: Install npm dependencies
-        if: (steps.detect.outputs.type == 'reactnative' || steps.detect.outputs.type == 'expo') && steps.node-modules-cache.outputs.cache-hit != 'true'
+        if: steps.detect.outputs.type == 'reactnative' || steps.detect.outputs.type == 'expo'
         run: |
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-fund --no-audit
+          else
+            npm install --no-fund --no-audit
+          fi
 
       - name: Expo prebuild (generate ios/ native project)
         if: steps.detect.outputs.type == 'expo'
         env:
           EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
+          NODE_ENV: production
         run: |
-          set -e
+          set -euo pipefail
           echo "EXPO_PUBLIC_API_URL=$EXPO_PUBLIC_API_URL"
-          npx expo prebuild --platform ios --non-interactive --no-install
-          # Ensure workflow ios_path points at generated folder
+          echo "app version: $(node -p "require('./app.json').expo.version")"
+          npx expo prebuild --platform ios --clean --non-interactive --no-install
           if [ ! -d "ios" ]; then
             echo "ERROR: expo prebuild did not create ios/"
             exit 1
           fi
-          echo "Generated ios/ contents:"
           ls -la ios
 
       - name: Restore Pods cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v5
         id: pods-cache
         with:
           path: |
             ios/Pods
-            ${{ inputs.ios_path }}/Pods
             ~/.cocoapods/repos
-          key: pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', format('{0}/Podfile.lock', inputs.ios_path)) }}
+          key: pods-ios-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', 'package-lock.json') }}
           restore-keys: |
-            pods-${{ runner.os }}-
+            pods-ios-${{ runner.os }}-
 
       - name: Install certificate and provisioning profile
         if: inputs.use_signing
@@ -137,33 +118,23 @@ jobs:
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
           IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
         run: |
-          set -e
-
-          # Create temporary keychain
+          set -euo pipefail
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # Import certificate
           CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
           echo "$IOS_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
           security import "$CERTIFICATE_PATH" -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          # Install provisioning profile
           PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
           echo "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$PROFILE_PATH"
-
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           PROFILE_UUID=$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)
           cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$PROFILE_UUID".mobileprovision
-
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
-          echo "Certificate and provisioning profile installed"
 
       - name: Build IPA
         env:
@@ -174,121 +145,94 @@ jobs:
           USE_SIGNING: ${{ inputs.use_signing }}
           CONFIGURATION: ${{ inputs.configuration }}
           EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
+          # Production bundle: Hermes minify ON for Release (smaller + faster startup)
+          NODE_ENV: production
+          RCT_NO_LAUNCH_PACKAGER: '1'
         run: |
-          set -e
+          set -euo pipefail
           export EXPO_PUBLIC_API_URL="${EXPO_PUBLIC_API_URL:-https://crew.kingdom.forum/api}"
+          export NODE_ENV=production
+          export RCT_NO_LAUNCH_PACKAGER=1
 
-          # Expo managed apps generate native code under ios/ via prebuild
           if [ "$PROJECT_TYPE" = "expo" ] && [ -d "ios" ]; then
             IOS_PATH="ios"
           fi
 
-          # Navigate to iOS project
           cd "$IOS_PATH"
 
-          # Find workspace or project
-          WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)
-          PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1)
+          WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
+          PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1 || true)
 
-          # Install pods if Podfile exists (always run to ensure sync with Podfile.lock)
           if [ -f "Podfile" ]; then
-            echo "Running pod install..."
-            pod install
-            WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)
-          fi
-
-          # Determine scheme (only needed for native projects)
-          if [ -z "$SCHEME" ] && [ "$PROJECT_TYPE" = "native" ]; then
-            if [ -n "$WORKSPACE" ]; then
-              SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A 100 "Schemes:" | tail -n +2 | grep -v -E "^[[:space:]]*Pods-" | head -1 | xargs)
-              if [ -z "$SCHEME" ]; then
-                SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A 100 "Schemes:" | tail -n +2 | head -1 | xargs)
-              fi
-            elif [ -n "$PROJECT" ]; then
-              SCHEME=$(xcodebuild -project "$PROJECT" -list 2>/dev/null | grep -A 100 "Schemes:" | tail -n +2 | head -1 | xargs)
-            fi
-            echo "Building with scheme: $SCHEME (configuration: $CONFIGURATION)"
-          fi
-
-          # Use custom DerivedData path for caching
-          DERIVED_DATA_PATH="${GITHUB_WORKSPACE}/DerivedData"
-
-          if [ "$PROJECT_TYPE" = "flutter" ]; then
-            cd ..
-            if [ "$CONFIGURATION" = "Debug" ]; then
-              echo "Building Flutter iOS Debug..."
-              flutter build ios --debug --no-codesign
+            echo "Installing CocoaPods via npx pod-install (RN-recommended; avoids bare pod install deprecation)..."
+            # Prefer repo-local pod-install; fall back to cocoapods
+            if npx --yes pod-install 2>/dev/null; then
+              echo "pod-install OK"
             else
-              echo "Building Flutter iOS Release..."
-              flutter build ios --release --no-codesign
+              echo "pod-install fallback → pod install"
+              pod install
             fi
-            cd "$IOS_PATH"
-          elif [ "$PROJECT_TYPE" = "reactnative" ] || [ "$PROJECT_TYPE" = "expo" ]; then
-            # Use xcodebuild directly for React Native/Expo
-            echo "Building React Native iOS ($CONFIGURATION)..."
-            BUILD_CMD="xcodebuild"
-            if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace $WORKSPACE"
-            elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project $PROJECT"
-            fi
+            WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
+          fi
 
-            # Auto-detect scheme from workspace name (e.g., MyApp.xcworkspace -> MyApp)
-            if [ -n "$WORKSPACE" ]; then
+          if [ -z "${SCHEME:-}" ]; then
+            if [ -n "${WORKSPACE:-}" ]; then
               SCHEME=$(basename "$WORKSPACE" .xcworkspace)
-            elif [ -n "$PROJECT" ]; then
+            elif [ -n "${PROJECT:-}" ]; then
               SCHEME=$(basename "$PROJECT" .xcodeproj)
             fi
+          fi
+          echo "Scheme=$SCHEME Configuration=$CONFIGURATION"
 
-            BUILD_CMD="$BUILD_CMD -scheme $SCHEME"
-            BUILD_CMD="$BUILD_CMD -configuration $CONFIGURATION"
-            BUILD_CMD="$BUILD_CMD -destination 'generic/platform=iOS'"
-            BUILD_CMD="$BUILD_CMD -derivedDataPath $DERIVED_DATA_PATH"
-            BUILD_CMD="$BUILD_CMD CODE_SIGNING_ALLOWED=NO"
-            BUILD_CMD="$BUILD_CMD COMPILER_INDEX_STORE_ENABLE=NO"
-            BUILD_CMD="$BUILD_CMD -quiet build"
+          DERIVED_DATA_PATH="${GITHUB_WORKSPACE}/DerivedData"
 
-            echo "Running: $BUILD_CMD"
-            eval $BUILD_CMD
+          BUILD_CMD=(xcodebuild)
+          if [ -n "${WORKSPACE:-}" ]; then
+            BUILD_CMD+=(-workspace "$WORKSPACE")
+          elif [ -n "${PROJECT:-}" ]; then
+            BUILD_CMD+=(-project "$PROJECT")
+          fi
+          BUILD_CMD+=(
+            -scheme "$SCHEME"
+            -configuration "$CONFIGURATION"
+            -destination "generic/platform=iOS"
+            -derivedDataPath "$DERIVED_DATA_PATH"
+            COMPILER_INDEX_STORE_ENABLE=NO
+            SWIFT_COMPILATION_MODE=wholemodule
+          )
+
+          if [ "$USE_SIGNING" = "true" ]; then
+            BUILD_CMD+=(-archivePath ../build/App.xcarchive archive)
           else
-            BUILD_CMD="xcodebuild"
-            if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace $WORKSPACE"
-            elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project $PROJECT"
-            fi
-
-            BUILD_CMD="$BUILD_CMD -scheme $SCHEME"
-            BUILD_CMD="$BUILD_CMD -configuration $CONFIGURATION"
-            BUILD_CMD="$BUILD_CMD -destination 'generic/platform=iOS'"
-            BUILD_CMD="$BUILD_CMD -derivedDataPath $DERIVED_DATA_PATH"
-
-            # Speed optimization flags
-            BUILD_CMD="$BUILD_CMD COMPILER_INDEX_STORE_ENABLE=NO"
-            BUILD_CMD="$BUILD_CMD DEBUG_INFORMATION_FORMAT=dwarf"
-            BUILD_CMD="$BUILD_CMD ONLY_ACTIVE_ARCH=YES"
-            BUILD_CMD="$BUILD_CMD -quiet"
-
-            # Xcode 16+ native compilation caching
-            BUILD_CMD="$BUILD_CMD SWIFT_ENABLE_COMPILE_CACHE=YES"
-            BUILD_CMD="$BUILD_CMD CLANG_ENABLE_COMPILE_CACHE=YES"
-
-            if [ "$USE_SIGNING" = "true" ]; then
-              # For signed builds, use archive
-              BUILD_CMD="$BUILD_CMD -archivePath ../build/App.xcarchive archive"
-            else
-              # For unsigned builds, use faster 'build' action
-              BUILD_CMD="$BUILD_CMD CODE_SIGNING_ALLOWED=NO build"
-            fi
-
-            echo "Running: $BUILD_CMD"
-            eval $BUILD_CMD
+            BUILD_CMD+=(
+              CODE_SIGNING_ALLOWED=NO
+              CODE_SIGN_IDENTITY=
+              CODE_SIGNING_REQUIRED=NO
+              build
+            )
           fi
 
-          # Create IPA
+          echo "Running xcodebuild ($CONFIGURATION)..."
+          set +e
+          "${BUILD_CMD[@]}" 2>&1 | tee /tmp/xcodebuild.log
+          XC=${PIPESTATUS[0]}
+          set -e
+          tail -n 60 /tmp/xcodebuild.log || true
+          if [ "${XC}" -ne 0 ] || grep -q "\*\* BUILD FAILED \*\*" /tmp/xcodebuild.log; then
+            echo "xcodebuild failed (exit=${XC})"
+            grep -E "error:|BUILD FAILED" /tmp/xcodebuild.log | tail -n 50 || true
+            exit 1
+          fi
+          if grep -q "\*\* BUILD SUCCEEDED \*\*" /tmp/xcodebuild.log; then
+            echo "xcodebuild: BUILD SUCCEEDED"
+          else
+            echo "Note: BUILD SUCCEEDED marker not found; verifying .app exists next..."
+          fi
+
+          cd "${GITHUB_WORKSPACE}"
+          mkdir -p build
+
           if [ "$USE_SIGNING" = "true" ]; then
-            # For signed builds, use xcodebuild -exportArchive
-            cd ..
             printf '%s\n' \
               '<?xml version="1.0" encoding="UTF-8"?>' \
               '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -304,53 +248,60 @@ jobs:
               -archivePath build/App.xcarchive \
               -exportOptionsPlist ExportOptions.plist \
               -exportPath build/export
-
-            # Move IPA to expected location
-            mv build/export/*.ipa "build/$BUILD_ID.ipa"
-            echo "Created signed IPA: build/$BUILD_ID.ipa"
+            mv build/export/*.ipa "build/${BUILD_ID}.ipa"
           else
-            # For unsigned builds, find .app and create IPA
-            if [ "$PROJECT_TYPE" = "flutter" ]; then
-              # Flutter outputs to build/ios/iphoneos/
-              APP_PATH=$(find "${GITHUB_WORKSPACE}/build/ios/iphoneos" -name "*.app" -type d | head -1)
-            else
-              # Native and React Native/Expo use DerivedData
-              APP_PATH=$(find "$DERIVED_DATA_PATH/Build/Products/${CONFIGURATION}-iphoneos" -name "*.app" -type d | head -1)
-            fi
-
+            APP_PATH=$(find "$DERIVED_DATA_PATH/Build/Products/${CONFIGURATION}-iphoneos" -name "*.app" -type d | head -1 || true)
             if [ -z "$APP_PATH" ]; then
-              echo "Error: Could not find .app"
+              echo "Error: Could not find .app under $DERIVED_DATA_PATH"
+              find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 3 -type d 2>/dev/null || true
               exit 1
             fi
             echo "Found app at: $APP_PATH"
-            cd ..
+            # Show embedded version for QA
+            if [ -f "$APP_PATH/app.config" ]; then
+              head -c 400 "$APP_PATH/app.config" || true
+              echo
+            fi
+            # Confirm JS bundle exists (Hermes / main.jsbundle)
+            ls -lah "$APP_PATH" | head -n 40
             mkdir -p build/Payload
             cp -R "$APP_PATH" build/Payload/
-            cd build
-            zip -rq "$BUILD_ID.ipa" Payload
-            rm -rf Payload
-            echo "Created unsigned IPA: build/$BUILD_ID.ipa"
+            (
+              cd build
+              zip -rq "${BUILD_ID}.ipa" Payload
+              rm -rf Payload
+            )
+            echo "Created unsigned IPA: build/${BUILD_ID}.ipa ($(ls -lh "build/${BUILD_ID}.ipa" | awk '{print $5}'))"
           fi
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ipa
           path: build/*.ipa
-          retention-days: 7
+          retention-days: 14
           if-no-files-found: error
 
       - name: Save DerivedData cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always()
         with:
           path: DerivedData
-          key: deriveddata-${{ github.run_id }}
+          key: deriveddata-ios-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json') }}
+
+      - name: Save Pods cache
+        uses: actions/cache/save@v5
+        if: always() && hashFiles('ios/Podfile.lock') != ''
+        with:
+          path: |
+            ios/Pods
+            ~/.cocoapods/repos
+          key: pods-ios-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', 'package-lock.json') }}
 
       - name: Cleanup signing
         if: always() && inputs.use_signing
         run: |
-          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH" || true
           fi
 
@@ -360,20 +311,20 @@ jobs:
           USE_SIGNING: ${{ inputs.use_signing }}
           CONFIGURATION: ${{ inputs.configuration }}
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## iOS Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Build ID:** ${{ inputs.build_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Configuration:** $CONFIGURATION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node:** 24 (actions majors Node-24 native)" >> $GITHUB_STEP_SUMMARY
           echo "- **DerivedData Cache:** ${{ steps.cache-deriveddata.outputs.cache-hit == 'true' && 'Hit' || 'Miss' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Pods Cache:** ${{ steps.pods-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Node Modules Cache:** ${{ steps.node-modules-cache.outputs.cache-hit == 'true' && 'Hit' || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
           if [ "$USE_SIGNING" = "true" ]; then
             echo "- **Signing:** Signed (development)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- **Signing:** Unsigned (sign locally with AltStore/Sideloadly)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Signing:** Unsigned (Sideloadly / AltStore)" >> $GITHUB_STEP_SUMMARY
           fi
-          if [ -f build/*.ipa ]; then
+          if ls build/*.ipa 1>/dev/null 2>&1; then
             IPA_PATH=$(find build -name "*.ipa" -type f | head -1)
             echo "- **IPA Size:** $(ls -lh "$IPA_PATH" | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
           fi

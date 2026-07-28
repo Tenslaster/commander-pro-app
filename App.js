@@ -9016,7 +9016,7 @@ function AppInner() {
                 showsVerticalScrollIndicator={false}
               >
                 <Text style={styles.panelTitle}>Vue d’ensemble serveur</Text>
-                <View style={styles.statsGrid}>
+                <View style={styles.adminStatsGrid}>
                   <View style={[styles.statBox, compact && styles.statBoxFull]}>
                     <Text style={styles.statVal}>{adminData?.sessions?.total ?? '—'}</Text>
                     <Text style={styles.statLbl}>Sessions</Text>
@@ -11838,7 +11838,8 @@ const styles = StyleSheet.create({
   },
 
   panelTitle: { color: '#e2e8f0', fontSize: 15, fontWeight: '800', marginBottom: 8 },
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  // Separate from statsGrid (Stats tab) — Hermes warned about duplicate StyleSheet key
+  adminStatsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   statBox: {
     width: '48%',
     backgroundColor: 'rgba(255,255,255,0.04)',
