@@ -9,11 +9,15 @@ set "DOWNLOAD_HOST=0.0.0.0"
 set "DOWNLOAD_PORT=8787"
 
 echo ========================================
-echo  Commander PRO Download Server
+echo  Crew Download Server
+echo  Commander PRO + WithYou
 echo ========================================
 echo  https://crew.kingdom.forum/downloads
 echo  https://crew.kingdom.forum/downloads/apk
 echo  https://crew.kingdom.forum/downloads/ipa
+echo  https://crew.kingdom.forum/downloads/withyou
+echo  https://crew.kingdom.forum/downloads/withyou/apk
+echo  https://crew.kingdom.forum/downloads/withyou/ipa
 echo.
 echo  Local: http://127.0.0.1:%DOWNLOAD_PORT%/downloads
 echo  Needs Cloudflare Tunnel path /downloads -^> :8787

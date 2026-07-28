@@ -2,7 +2,7 @@
   "expo": {
     "name": "Commander PRO",
     "slug": "iphone-batch-manager",
-    "version": "1.4.1",
+    "version": "1.4.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -23,7 +23,8 @@
         "UIBackgroundModes": [
           "remote-notification",
           "fetch",
-          "processing"
+          "processing",
+          "audio"
         ],
         "BGTaskSchedulerPermittedIdentifiers": [
           "com.commanderpro.radios.expo-background-fetch"
@@ -32,7 +33,7 @@
     },
     "android": {
       "package": "com.commanderpro.radios",
-      "versionCode": 141,
+      "versionCode": 142,
       "adaptiveIcon": {
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -52,7 +53,9 @@
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.WAKE_LOCK",
         "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-        "android.permission.FOREGROUND_SERVICE"
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "edgeToEdgeEnabled": true,
       "googleServicesFile": "./google-services.json"
@@ -82,7 +85,13 @@
           "defaultChannel": "commander-pro"
         }
       ],
-      "expo-background-fetch"
+      "expo-background-fetch",
+      [
+        "expo-av",
+        {
+          "microphonePermission": false
+        }
+      ]
     ]
   }
 }

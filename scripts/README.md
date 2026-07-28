@@ -21,10 +21,11 @@
 
 **Never commit** `credentials/fcm-service-account.json`.
 
-## Quality
+## Quality / maintenance
 | Script | Purpose |
 |--------|---------|
 | `smoke_test.py` | Local health checks API + downloads |
+| `repack_ipa_js.py` | Inject new JS into IPA when GH/EAS unavailable |
 
 ```bat
 python scripts\smoke_test.py

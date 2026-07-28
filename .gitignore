@@ -42,6 +42,14 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Temp IPA repack / expo export workdirs
+dist-ios-export/
+dist-ipa-work/
+ios-install/
+*.ipa.bak
+*-backup.ipa
+*-pre-repack-backup.ipa
+
 # Editor
 .idea/
 .vscode/

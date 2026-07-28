@@ -34,8 +34,18 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import * as Device from 'expo-device';
 import * as SecureStore from 'expo-secure-store';
-import { assessDeviceIntegrity, assertSecureApiUrl } from './deviceSecurity';
+import {
+  assessDeviceIntegrity,
+  assessDeviceIntegrityFull,
+  assertSecureApiUrl,
+} from './deviceSecurity';
+import {
+  buildSecureHeaders,
+  redactSecrets,
+  isJsonContentType,
+} from './apiSecurity';
 import * as ImagePicker from 'expo-image-picker';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { LANG_KEY, createT, normalizeLang } from './i18n';
 import {
   startBackgroundNotifyFetch,
@@ -48,7 +58,16 @@ import {
   cacheClearAll,
   cachePeek,
   cacheUsable,
+  cacheRemove,
 } from './appCache';
+import {
+  createAdaptiveBudget,
+  startSmartLoop,
+  fingerprintProcesses,
+  fingerprintStreams,
+  fingerprintLogs,
+  fingerprintNotify,
+} from './smartPoll';
 
 /**
  * Runtime client:
@@ -139,7 +158,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -284,27 +303,40 @@ const ALERTS_CACHE_KEY_LEGACY = 'alerts_feed_cache_v1';
 const CHAT_READ_PREFIX = 'chat_read_';
 
 /**
- * Poll intervals (1.3.4): active tab stays snappy; idle tabs / battery much lighter.
- * Status still coalesces in-flight so stacked polls never pile up.
+ * Poll intervals (1.4.x perf): aligned with API smart caches + mid phones.
+ * Active tab snappy; idle tabs / battery much lighter. In-flight always coalesced.
  */
-const POLL_STATUS_MS = 4500;
-const POLL_STATUS_IDLE_MS = 16000;
-const POLL_LOGS_MS = 3500;
-const POLL_ADMIN_MS = 18000;
-const POLL_NOTIFY_MS = 5500;
-const POLL_NOTIFY_IDLE_MS = 22000;
-const POLL_CHAT_MS = 2800;
-const POLL_CHAT_LIST_MS = 5000;
-const POLL_CHAT_LIST_IDLE_MS = 24000;
-const COMMAND_REFRESH_MS = 900;
-const LOG_REFRESH_AFTER_CMD_MS = 450;
-const SEARCH_DEBOUNCE_MS = 180;
-const USERS_SEARCH_DEBOUNCE_MS = 300;
+/** Smart adaptive ranges (min when busy / max when quiet) */
+const POLL_STATUS_MS = 3500; // host /api/status cache ~1.4s — no need to spam
+const POLL_STATUS_IDLE_MS = 22000;
+const POLL_STATUS_MAX_MS = 36000;
+const POLL_LOGS_MS = 4500;
+const POLL_LOGS_MAX_MS = 16000;
+const POLL_ADMIN_MS = 24000;
+const POLL_NOTIFY_MS = 6000;
+const POLL_NOTIFY_IDLE_MS = 28000;
+const POLL_NOTIFY_MAX_MS = 48000;
+const POLL_CHAT_MS = 3200;
+const POLL_CHAT_MAX_MS = 12000;
+const POLL_CHAT_LIST_MS = 6000;
+const POLL_CHAT_LIST_IDLE_MS = 28000;
+const POLL_STREAMS_FAST_MS = 4500; // playing
+const POLL_STREAMS_IDLE_MS = 12000;
+const POLL_STREAMS_MAX_MS = 40000;
+const POLL_STATS_MS = 14000;
+const POLL_STATS_MAX_MS = 55000;
+const COMMAND_REFRESH_MS = 1000;
+const LOG_REFRESH_AFTER_CMD_MS = 500;
+const SEARCH_DEBOUNCE_MS = 200;
+const USERS_SEARCH_DEBOUNCE_MS = 320;
 /** Android/iOS background feed poll while JS still alive */
-const BG_POLL_MS_ANDROID = 35000;
-const BG_POLL_MS_IOS = 60000;
+const BG_POLL_MS_ANDROID = 45000;
+const BG_POLL_MS_IOS = 75000;
+/** Terminal log page size (smaller = less JS parse on mid phones) */
+const LOGS_FETCH_LIMIT = 80;
 
 // --- Platform best practices (iOS Human Interface + Android Material) ---
+// Keep BOTH platforms first-class: touch targets, lists, audio, AppState, safe area.
 const IS_IOS = Platform.OS === 'ios';
 const IS_ANDROID = Platform.OS === 'android';
 /** SecureStore: device-bound session (not iCloud-migrated / not shared) */
@@ -313,20 +345,31 @@ const SECURE_OPTS = IS_IOS
       keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
     }
   : undefined;
-/** Minimum comfortable touch target (~44pt Apple HIG / 48dp Material) */
-const HIT_SLOP_SM = { top: 8, bottom: 8, left: 8, right: 8 };
-const HIT_SLOP_MD = { top: 12, bottom: 12, left: 12, right: 12 };
+/**
+ * Minimum comfortable touch target:
+ *  - iOS HIG ~44pt
+ *  - Android Material ~48dp
+ * hitSlop pads smaller visual buttons without changing layout.
+ */
+const HIT_SLOP_SM = IS_ANDROID
+  ? { top: 10, bottom: 10, left: 10, right: 10 }
+  : { top: 8, bottom: 8, left: 8, right: 8 };
+const HIT_SLOP_MD = IS_ANDROID
+  ? { top: 14, bottom: 14, left: 14, right: 14 }
+  : { top: 12, bottom: 12, left: 12, right: 12 };
+/** Min square control size for play/stop (both platforms) */
+const MIN_TOUCH = IS_ANDROID ? 48 : 44;
 /** KeyboardAvoidingView for modals (login, sheets) — chat uses explicit keyboard height */
 const KAV_BEHAVIOR = IS_IOS ? 'padding' : 'height';
 const KAV_OFFSET_MODAL = IS_IOS ? 24 : 0;
 /** Dark theme inputs look correct in system keyboard */
 const INPUT_KEYBOARD_APPEARANCE = 'dark';
 /** Cap runaway Dynamic Type / font scale that can break dense admin UI */
-const MAX_FONT_MULT = 1.35;
+const MAX_FONT_MULT = IS_IOS ? 1.35 : 1.3;
 const lightVibrate = () => {
   try {
     if (IS_IOS) Vibration.vibrate(10);
-    else Vibration.vibrate(30);
+    else Vibration.vibrate(25);
   } catch {
     /* ignore */
   }
@@ -349,21 +392,36 @@ const darkInputProps = {
   maxFontSizeMultiplier: MAX_FONT_MULT,
   // Avoid iOS password-manager / Android autofill fighting system passwords
   importantForAutofill: 'no',
+  // iOS: prevent auto-zoom on small inputs; Android: keep stable
+  ...(IS_IOS ? { clearButtonMode: 'while-editing' } : {}),
 };
 
-/** Shared list props for RN lists on both platforms */
+/** Shared list props for RN lists on both platforms (SectionList / FlatList) */
 const platformListExtras = {
   keyboardShouldPersistTaps: 'handled',
   keyboardDismissMode: IS_IOS ? 'interactive' : 'on-drag',
-  // Android: avoid glow / overscroll fighting nested scroll parents
+  // SectionList + removeClippedSubviews=true blanks cells on some Android OEM + iOS tab switches
+  // Performance comes from windowSize / batching instead.
+  removeClippedSubviews: false,
   ...(IS_ANDROID
     ? {
         overScrollMode: 'never',
         nestedScrollEnabled: true,
+        // Edge-to-edge: keep scrollbars away from gesture nav
+        persistentScrollbar: false,
       }
     : {
         alwaysBounceVertical: true,
+        // iOS rubber-band feels native; indicator style for dark UI
+        indicatorStyle: 'white',
       }),
+};
+
+/** Pull-to-refresh colors that look correct on both platforms */
+const refreshControlProps = {
+  tintColor: '#38bdf8', // iOS spinner
+  colors: ['#38bdf8'], // Android Material spinner
+  progressBackgroundColor: IS_ANDROID ? '#111827' : undefined,
 };
 
 const ROLE_COLORS = {
@@ -406,6 +464,41 @@ const STATION_IDS = [
   'RADIO9',
   'RADIO10',
 ];
+/** Fallback stream paths (API provides full URLs when online) */
+const STATION_STREAM_MOUNT = {
+  RADIO1: '/stream',
+  RADIO2: '/stream2',
+  RADIO3: '/stream3',
+  RADIO4: '/stream4',
+  RADIO5: '/stream5',
+  RADIO6: '/stream6',
+  RADIO7: '/stream7',
+  RADIO8: '/stream8',
+  RADIO9: '/stream9',
+  RADIO10: '/stream10',
+};
+const STREAM_PUBLIC_BASE_FALLBACK = 'https://crew.kingdom.forum';
+
+/** Build a stable public Icecast URL for a station (Android + iOS). */
+function resolveStationStreamUrl(station, streamsMap) {
+  const st = STATION_IDS.includes(station) ? station : 'RADIO1';
+  const info = (streamsMap && streamsMap[st]) || {};
+  let url = String(info.stream_url || '').trim();
+  if (!url) {
+    const mount = STATION_STREAM_MOUNT[st] || '/stream';
+    url = `${STREAM_PUBLIC_BASE_FALLBACK}${mount}`;
+  }
+  // Icecast sometimes reports http://host:8000/... — force public HTTPS tunnel
+  try {
+    if (/^http:\/\//i.test(url) && /crew\.kingdom\.forum/i.test(url)) {
+      url = url.replace(/^http:\/\//i, 'https://').replace(/:8000(?=\/|$)/, '');
+    }
+  } catch {
+    /* ignore */
+  }
+  // Strip trailing junk / accidental spaces
+  return url.replace(/\s+/g, '').replace(/\/+$/, '') || url;
+}
 const USER_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin', 'owner', 'dev'];
 const OWNER_ONLY_RANKS = new Set(['owner', 'dev']);
 const RADIO_ADMIN_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin'];
@@ -417,7 +510,13 @@ const USER_LIST_FILTER_DEFS = [
   { id: 'mod', labelKey: 'Mod', color: '#34d399' },
   { id: 'admin', labelKey: 'Admin', color: '#60a5fa' },
   { id: 'owner', labelKey: 'Owner', color: '#c084fc' },
+  // Leaderboards (highest first)
+  { id: 'gold', labelKey: 'users.filter.gold', color: '#fbbf24' },
+  { id: 'time', labelKey: 'users.filter.time', color: '#22d3ee' },
+  { id: 'bank', labelKey: 'users.filter.bank', color: '#34d399' },
 ];
+/** Users-tab filters that act as sorted leaderboards */
+const USER_LEADERBOARD_FILTERS = new Set(['gold', 'time', 'bank']);
 /** Browse / search page sizes (radios can exceed 2k users) */
 const USERS_BROWSE_LIMIT = 15000;
 const USERS_SEARCH_LIMIT = 8000;
@@ -680,18 +779,20 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
 let _deviceIntegrityHeader = 'unknown';
 
 async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeoutMs } = {}) {
-  const headers = {
-    Accept: 'application/json',
-    // Cloudflare blocks some empty / bot signatures without a UA
-    'User-Agent': `CommanderPRO/${APP_VERSION} (Expo; ReactNative; ${APP_PLATFORM})`,
-    'X-App-Version': String(APP_VERSION),
-    'X-App-Platform': APP_PLATFORM,
-    'X-Device-Integrity': _deviceIntegrityHeader,
-    'X-Device-Name': String(
-      Device.modelName || Device.deviceName || Device.modelId || ''
-    ).slice(0, 48),
-  };
-  if (token) headers.Authorization = token;
+  // Production: refuse cleartext mid-session if someone hot-swapped API_URL
+  if (!IS_EXPO_GO && API_URL && !String(API_URL).startsWith('https://')) {
+    const err = new Error('API must use HTTPS');
+    err.code = 'INSECURE';
+    throw err;
+  }
+
+  const methodU = String(method || 'GET').toUpperCase();
+  const headers = buildSecureHeaders({
+    token,
+    method: methodU,
+    integrity: _deviceIntegrityHeader,
+    appVersion: APP_VERSION,
+  });
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
   // Optional timeout (login uses this so the button never stays stuck forever)
@@ -742,7 +843,7 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
   let response;
   try {
     response = await fetch(`${API_URL}${path}`, {
-      method,
+      method: methodU,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: combinedSignal,
@@ -771,6 +872,8 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
   }
   clearFetchGuards();
 
+  // Prefer JSON API responses; HTML/CF pages are network failures
+  const ct = response.headers?.get?.('content-type') || '';
   const text = await response.text();
   let parsed = null;
   if (text) {
@@ -778,7 +881,11 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
       parsed = JSON.parse(text);
     } catch {
       // Cloudflare HTML / non-JSON error pages
-      if (/cloudflare|error code:\s*10\d{2}/i.test(text) || response.status === 403) {
+      if (
+        !isJsonContentType(ct) ||
+        /cloudflare|error code:\s*10\d{2}/i.test(text) ||
+        response.status === 403
+      ) {
         const err = new Error('Accès bloqué (Cloudflare / réseau). Réessayez.');
         err.code = 'NETWORK';
         err.status = response.status;
@@ -790,7 +897,7 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
 
   const serverMsg =
     parsed && typeof parsed === 'object' && parsed.error
-      ? String(parsed.error)
+      ? redactSecrets(String(parsed.error))
       : '';
 
   // Login 401 = wrong password; later 401 = expired session
@@ -1356,6 +1463,202 @@ const isBotProcess = (item) =>
     /highrise/i.test(item?.name || '')
   );
 
+/**
+ * In-app Icecast player — Android + iOS (expo-av).
+ * Always playable via public CF URL fallback; listeners from /api/streams.
+ */
+const RadioPlayerBar = React.memo(
+  ({
+    stationsMap,
+    stationId,
+    playing,
+    loading,
+    isOwner,
+    allowedStations,
+    onSelectStation,
+    onTogglePlay,
+    t,
+  }) => {
+    const tr = typeof t === 'function' ? t : (k) => k;
+    const list =
+      Array.isArray(allowedStations) && allowedStations.length
+        ? allowedStations
+        : STATION_IDS;
+    const info = (stationsMap && stationsMap[stationId]) || {};
+    const listeners =
+      typeof info.listeners === 'number' ? info.listeners : null;
+    // Prefer live track title; fall back to station/stream name
+    const nowPlaying = String(info.title || '').trim();
+    const stationName = String(info.server_name || '').trim();
+    const title = nowPlaying || stationName;
+    // Always have a public URL (API or fallback mount) — never block Play
+    const streamUrl = resolveStationStreamUrl(stationId, stationsMap);
+    const sourceOnline = info.online === true;
+    const color = ROLE_COLORS[stationId] || '#22d3ee';
+    const statusLine = playing
+      ? tr('radio.playing')
+      : sourceOnline
+        ? tr('radio.live')
+        : streamUrl
+          ? tr('radio.ready')
+          : tr('radio.offline');
+
+    return (
+      <View
+        style={styles.radioPlayer}
+        // Promote this panel to a GPU compositor layer (Android) — smoother
+        // title/listener updates without re-rasterizing the whole Radios tab.
+        renderToHardwareTextureAndroid
+        shouldRasterizeIOS
+      >
+        <View style={styles.radioPlayerHead}>
+          <View style={styles.radioPlayerTitleRow}>
+            <Ionicons name="radio" size={16} color={color} />
+            <Text style={styles.radioPlayerTitle}>{tr('radio.listen')}</Text>
+            {playing ? (
+              <View style={styles.radioLiveDotWrap}>
+                <View style={styles.radioLiveDot} />
+                <Text style={styles.radioLiveDotText}>LIVE</Text>
+              </View>
+            ) : null}
+          </View>
+          <View style={styles.radioListenersPill}>
+            <Ionicons name="headset" size={13} color="#a5b4fc" />
+            <Text style={styles.radioListenersText}>
+              {listeners == null ? '—' : listeners} {tr('radio.listeners')}
+            </Text>
+          </View>
+        </View>
+
+        {isOwner || list.length > 1 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.radioStationChips}
+            keyboardShouldPersistTaps="handled"
+          >
+            {list.map((st) => {
+              const stInfo = (stationsMap && stationsMap[st]) || {};
+              const n =
+                typeof stInfo.listeners === 'number' ? stInfo.listeners : null;
+              const active = st === stationId;
+              const stColor = ROLE_COLORS[st] || '#22d3ee';
+              return (
+                <TouchableOpacity
+                  key={st}
+                  onPress={() => onSelectStation?.(st)}
+                  style={[
+                    styles.radioStationChip,
+                    active && {
+                      backgroundColor: `${stColor}33`,
+                      borderColor: stColor,
+                    },
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                >
+                  <Text
+                    style={[
+                      styles.radioStationChipText,
+                      active && { color: stColor },
+                    ]}
+                  >
+                    {String(st).replace('RADIO', 'R')}
+                  </Text>
+                  {n != null ? (
+                    <Text style={styles.radioStationChipMeta}>{n}</Text>
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        ) : null}
+
+        <View style={styles.radioPlayerBody}>
+          <TouchableOpacity
+            style={[
+              styles.radioPlayBtn,
+              {
+                width: MIN_TOUCH,
+                height: MIN_TOUCH,
+                borderRadius: MIN_TOUCH / 2,
+                backgroundColor: playing
+                  ? '#ef4444'
+                  : loading
+                    ? '#64748b'
+                    : color,
+              },
+            ]}
+            onPress={() => onTogglePlay?.()}
+            disabled={!!loading}
+            accessibilityRole="button"
+            accessibilityState={{ busy: !!loading, selected: !!playing }}
+            accessibilityLabel={
+              playing ? tr('radio.stop') : tr('radio.play')
+            }
+            hitSlop={HIT_SLOP_MD}
+          >
+            {loading ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Ionicons
+                name={playing ? 'stop' : 'play'}
+                size={22}
+                color="#fff"
+                style={!playing ? { marginLeft: 2 } : undefined}
+              />
+            )}
+          </TouchableOpacity>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.radioNowStation} numberOfLines={1}>
+              {stationId?.replace('RADIO', 'Radio ') || '—'}
+              {` · ${statusLine}`}
+              {listeners != null ? ` · 🎧 ${listeners}` : ''}
+            </Text>
+            <Text style={styles.radioNowPlayingLabel} numberOfLines={1}>
+              {tr('radio.nowPlaying')}
+            </Text>
+            <Text
+              style={[
+                styles.radioNowTitle,
+                !title && styles.radioNowTitleMuted,
+              ]}
+              numberOfLines={2}
+            >
+              {title ||
+                (playing
+                  ? tr('radio.streaming')
+                  : sourceOnline
+                    ? tr('radio.live')
+                    : tr('radio.tapPlay'))}
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+  },
+  (a, b) => {
+    // Avoid full map compare — only care about current station meta + controls
+    if (a.stationId !== b.stationId) return false;
+    if (a.playing !== b.playing || a.loading !== b.loading) return false;
+    if (a.isOwner !== b.isOwner || a.t !== b.t) return false;
+    if (a.onSelectStation !== b.onSelectStation || a.onTogglePlay !== b.onTogglePlay)
+      return false;
+    const sa = (a.stationsMap && a.stationsMap[a.stationId]) || {};
+    const sb = (b.stationsMap && b.stationsMap[b.stationId]) || {};
+    if (sa.title !== sb.title) return false;
+    if (sa.server_name !== sb.server_name) return false;
+    if (sa.listeners !== sb.listeners) return false;
+    if (sa.online !== sb.online) return false;
+    // allowedStations length / ids (owner vs radio)
+    const la = a.allowedStations || [];
+    const lb = b.allowedStations || [];
+    if (la.length !== lb.length) return false;
+    for (let i = 0; i < la.length; i += 1) if (la[i] !== lb[i]) return false;
+    return true;
+  }
+);
+
 /** Action buttons are OUTSIDE the card press target so taps never open terminal by mistake. */
 const ProcessCard = React.memo(
   ({
@@ -1622,26 +1925,30 @@ const ProcessSearchBar = React.memo(({ placeholder, onChangeDebounced, debounceM
 ));
 
 const UserRow = React.memo(
-  ({ item, stationFallback, onPress }) => {
+  ({ item, onPress, leaderboardPlace }) => {
     const rank = (item.rank || 'guest').toLowerCase();
     const color = rankColor(rank);
-    const st = item.station || stationFallback || '';
-    const stColor = ROLE_COLORS[st] || '#64748b';
+    const place = Number(leaderboardPlace) || 0;
     return (
       <TouchableOpacity
         style={[styles.userRow, item.banned && styles.userRowBanned]}
         onPress={() => onPress(item)}
         activeOpacity={0.75}
       >
+        {place > 0 ? (
+          <View
+            style={[
+              styles.userLeadPlace,
+              place === 1 && styles.userLeadPlaceGold,
+              place === 2 && styles.userLeadPlaceSilver,
+              place === 3 && styles.userLeadPlaceBronze,
+            ]}
+          >
+            <Text style={styles.userLeadPlaceText}>#{place}</Text>
+          </View>
+        ) : null}
         <View style={{ flex: 1, minWidth: 0 }}>
           <View style={styles.userRowTop}>
-            {st ? (
-              <View style={[styles.userStationPill, { borderColor: stColor }]}>
-                <Text style={[styles.userStationPillText, { color: stColor }]}>
-                  {String(st).replace('RADIO', 'R')}
-                </Text>
-              </View>
-            ) : null}
             <Text style={styles.userRowName} numberOfLines={1}>
               {item.username}
             </Text>
@@ -1674,18 +1981,18 @@ const UserRow = React.memo(
   },
   (a, b) =>
     a.onPress === b.onPress &&
-    a.stationFallback === b.stationFallback &&
+    a.leaderboardPlace === b.leaderboardPlace &&
     a.item?.id === b.item?.id &&
     a.item?.username === b.item?.username &&
     a.item?.rank === b.item?.rank &&
     a.item?.bank === b.item?.bank &&
     a.item?.banned === b.item?.banned &&
-    a.item?.station === b.item?.station &&
     a.item?.songs_played === b.item?.songs_played &&
     a.item?.gold_tipped === b.item?.gold_tipped &&
     a.item?.gold_transferred_out === b.item?.gold_transferred_out &&
     a.item?.gold_transferred_in === b.item?.gold_transferred_in &&
-    a.item?.room_time === b.item?.room_time
+    a.item?.room_time === b.item?.room_time &&
+    a.item?.room_minutes === b.item?.room_minutes
 );
 
 const BottomNavItem = React.memo(
@@ -1874,6 +2181,24 @@ function AppInner() {
   const statsInflightRef = useRef(false);
   const statsFetchGenRef = useRef(0);
 
+  // Live radio listen (Icecast via Cloudflare) — Android + iOS (expo-av)
+  const [streamsMap, setStreamsMap] = useState({});
+  const [listenStation, setListenStation] = useState('RADIO1');
+  const [listenPlaying, setListenPlaying] = useState(false);
+  const [listenLoading, setListenLoading] = useState(false);
+  const soundRef = useRef(null);
+  const listenStationRef = useRef('RADIO1');
+  const listenPlayingRef = useRef(false);
+  const listenWantRef = useRef(false); // user wants audio on (reconnects if drop)
+  const playGenRef = useRef(0); // ignore stale async play/stop races
+  const streamsMapRef = useRef({});
+  const streamsInflightRef = useRef(false);
+  const audioModeReadyRef = useRef(false);
+  const reconnectTimerRef = useRef(null);
+  /** Cap auto-reconnect so a dead mount cannot spin forever */
+  const reconnectAttemptsRef = useRef(0);
+  const MAX_RADIO_RECONNECTS = 4;
+
   // Management tab — APP login accounts (not Highrise room users)
   const [appUsersList, setAppUsersList] = useState([]);
   const [appUsersLoading, setAppUsersLoading] = useState(false);
@@ -1933,6 +2258,39 @@ function AppInner() {
   const netFailCountRef = useRef(0);
   /** Prevent overlapping polls (slow networks) from stacking work */
   const statusInflightRef = useRef(false);
+  const statusFpRef = useRef('');
+  const streamsFpRef = useRef('');
+  const statsFpRef = useRef('');
+  // Adaptive budgets — calm when quiet, snappy when data moves
+  const statusBudgetRef = useRef(
+    createAdaptiveBudget({
+      minMs: POLL_STATUS_MS,
+      maxMs: POLL_STATUS_MAX_MS,
+      quietBeforeSlow: 2,
+    })
+  );
+  const streamsBudgetRef = useRef(
+    createAdaptiveBudget({
+      minMs: POLL_STREAMS_FAST_MS,
+      maxMs: POLL_STREAMS_MAX_MS,
+      quietBeforeSlow: 2,
+      stepUp: 1.45,
+    })
+  );
+  const notifyBudgetRef = useRef(
+    createAdaptiveBudget({
+      minMs: POLL_NOTIFY_MS,
+      maxMs: POLL_NOTIFY_MAX_MS,
+      quietBeforeSlow: 3,
+    })
+  );
+  const statsBudgetRef = useRef(
+    createAdaptiveBudget({
+      minMs: POLL_STATS_MS,
+      maxMs: POLL_STATS_MAX_MS,
+      quietBeforeSlow: 2,
+    })
+  );
   const notifyInflightRef = useRef(false);
   const chatChannelsInflightRef = useRef(false);
   const [usersSearchBarKey, setUsersSearchBarKey] = useState(0);
@@ -2100,6 +2458,29 @@ function AppInner() {
     pushOkRef.current = false;
     deviceRegisteredRef.current = false;
     loginInflightRef.current = false;
+    // Stop live radio if playing
+    try {
+      listenWantRef.current = false;
+      reconnectAttemptsRef.current = 0;
+      playGenRef.current += 1;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      const snd = soundRef.current;
+      soundRef.current = null;
+      if (snd) {
+        snd.stopAsync?.().catch?.(() => {});
+        snd.unloadAsync?.().catch?.(() => {});
+      }
+    } catch {
+      /* ignore */
+    }
+    listenPlayingRef.current = false;
+    setListenPlaying(false);
+    setListenLoading(false);
+    setStreamsMap({});
+    streamsMapRef.current = {};
     stopBackgroundNotifyFetch().catch(() => {});
     cacheClearAll().catch(() => {});
     try {
@@ -2395,6 +2776,8 @@ function AppInner() {
         setManageStation(role);
         setPlaylistStation(role);
         setStatsStation(role);
+        setListenStation(role);
+        listenStationRef.current = role;
       }
       setBiometricGate(false);
       pendingSessionRef.current = null;
@@ -2618,12 +3001,14 @@ function AppInner() {
       try {
         // Device integrity (rooted / jailbreak heuristics) — warn, still allow use
         try {
-          const integ = await assessDeviceIntegrity();
-          _deviceIntegrityHeader = integ.compromised
-            ? `risk:${(integ.reasons || []).join(',') || 'flagged'}`
-            : integ.isDevice
-              ? 'ok'
-              : 'emulator';
+          const integ = await assessDeviceIntegrityFull();
+          _deviceIntegrityHeader =
+            integ.header ||
+            (integ.compromised
+              ? `high:${(integ.reasons || []).join(',') || 'flagged'}`
+              : integ.isDevice
+                ? 'ok:none'
+                : 'medium:emulator_or_simulator');
           if (
             integ.compromised &&
             !IS_EXPO_GO &&
@@ -2880,10 +3265,11 @@ function AppInner() {
 
   const fetchStatus = useCallback(
     async (isManualRefresh = false) => {
+      statusInflightRef._lastChanged = false;
       const token = authTokenRef.current;
-      if (!token) return;
+      if (!token) return false;
       // Coalesce background polls — never stack status requests
-      if (!isManualRefresh && statusInflightRef.current) return;
+      if (!isManualRefresh && statusInflightRef.current) return false;
       statusInflightRef.current = true;
 
       const t0 = Date.now();
@@ -2891,7 +3277,8 @@ function AppInner() {
         if (isManualRefresh && mountedRef.current) setRefreshing(true);
 
         const data = await apiFetch('/status', { token, timeoutMs: 12000 });
-        if (!data || typeof data !== 'object' || Array.isArray(data) || !mountedRef.current) return;
+        if (!data || typeof data !== 'object' || Array.isArray(data) || !mountedRef.current)
+          return false;
 
         // 1.3.4: single-pass map + sort without intermediate filter alloc
         const keys = Object.keys(data);
@@ -2971,23 +3358,39 @@ function AppInner() {
         prevStatusReadyRef.current = true;
 
         if (isManualRefresh) animateLayout();
-        // Skip setState when snapshot unchanged — avoids full list re-render every 3s
-        setProcesses((prev) => mergeProcessList(prev, procArray));
+        // Fingerprint for smart poll (status/pid only)
+        const nextFp = fingerprintProcesses(procArray);
+        const statusChanged = nextFp !== statusFpRef.current;
+        statusFpRef.current = nextFp;
+        // Skip setState when snapshot unchanged — avoids full list re-render every poll
+        if (statusChanged || isManualRefresh || !statusFpRef.current) {
+          setProcesses((prev) => mergeProcessList(prev, procArray));
+        } else {
+          // Fingerprint matched — still merge in case object identity needed once
+          setProcesses((prev) => {
+            const merged = mergeProcessList(prev, procArray);
+            return merged === prev ? prev : merged;
+          });
+        }
         setStatusLoaded((prev) => (prev ? prev : true));
         netFailCountRef.current = 0;
         setConnectionOk((prev) => (prev ? prev : true));
-        cacheSet('status', '', procArray).catch(() => {});
+        if (statusChanged || isManualRefresh) {
+          cacheSet('status', '', procArray).catch(() => {});
+        }
         const ms = Date.now() - t0;
         lastSyncAtRef.current = Date.now();
-        // Throttle latency header updates (avoid re-render every poll for ±few ms)
+        // Throttle latency header updates harder (skip ±80ms noise)
         if (
           lastLatencyRef.current == null ||
-          Math.abs(lastLatencyRef.current - ms) >= 40 ||
+          Math.abs(lastLatencyRef.current - ms) >= 80 ||
           isManualRefresh
         ) {
           lastLatencyRef.current = ms;
           setLatencyMs(ms);
         }
+        // Expose change flag for adaptive loop via ref
+        statusInflightRef._lastChanged = statusChanged;
       } catch (error) {
         // Offline / failed poll: keep last good snapshot from cache if UI empty
         try {
@@ -3010,7 +3413,7 @@ function AppInner() {
           applyForceUpdatePolicy(
             error.policy || { force_update: true, min_app_version: '999.0.0' }
           );
-          return;
+          return false;
         }
         if (error.code === 'UNAUTHORIZED') {
           // Only prompt when user is actually looking at the app
@@ -3018,11 +3421,11 @@ function AppInner() {
             Alert.alert(t('security.expired') || 'Session', t('security.expired'));
           }
           handleLogout();
-          return;
+          return false;
         }
         // Background / tab-out network blips: never treat as a hard error
         if (appStateRef.current !== 'active') {
-          return;
+          return false;
         }
         // Soft offline: only flip UI after a few consecutive failures while foreground
         netFailCountRef.current += 1;
@@ -3034,6 +3437,7 @@ function AppInner() {
         statusInflightRef.current = false;
         if (isManualRefresh && mountedRef.current) setRefreshing(false);
       }
+      return !!statusInflightRef._lastChanged;
     },
     [handleLogout, showBanner, applyForceUpdatePolicy, t]
   );
@@ -3125,11 +3529,17 @@ function AppInner() {
     }
   }, []);
 
+  const notifyFeedRef = useRef([]);
+  useEffect(() => {
+    notifyFeedRef.current = notifyFeed;
+  }, [notifyFeed]);
+
   const fetchNotifications = useCallback(
     async ({ silent = true } = {}) => {
+      notifyInflightRef._lastChanged = false;
       const token = authTokenRef.current;
-      if (!token) return;
-      if (silent && notifyInflightRef.current) return;
+      if (!token) return false;
+      if (silent && notifyInflightRef.current) return false;
       notifyInflightRef.current = true;
       if (!silent && mountedRef.current) setNotifyLoading(true);
       try {
@@ -3151,31 +3561,23 @@ function AppInner() {
             ? `&station=${encodeURIComponent(stationParam)}`
             : '';
         const data = await apiFetch(
-          `/notifications?limit=400${typeQ}${stQ}`,
-          { token }
+          `/notifications?limit=200${typeQ}${stQ}`,
+          { token, timeoutMs: 10000 }
         );
-        if (!mountedRef.current) return;
+        if (!mountedRef.current) return false;
         const items = Array.isArray(data?.items) ? data.items : [];
-        setNotifyFeed((prev) => {
-          if (prev.length === items.length && prev.length > 0) {
-            let same = true;
-            for (let i = 0; i < prev.length; i++) {
-              if (
-                prev[i]?.id !== items[i]?.id ||
-                prev[i]?.body !== items[i]?.body ||
-                prev[i]?.title !== items[i]?.title
-              ) {
-                same = false;
-                break;
-              }
-            }
-            if (same) return prev;
-          }
-          if (prev.length === 0 && items.length === 0) return prev;
-          return items;
-        });
-        // Client cache for instant Alerts tab (server remains source of truth)
-        cacheSet('notify', '', items).catch(() => {});
+        // O(1) edge fingerprint — avoid O(n) title/body walk every poll
+        const fp = fingerprintNotify(items);
+        const changed = fp !== (notifyInflightRef._fp || '');
+        if (changed) {
+          notifyInflightRef._fp = fp;
+          setNotifyFeed(items);
+          notifyFeedRef.current = items;
+          cacheSet('notify', '', items).catch(() => {});
+        } else if (!items.length && !notifyFeedRef.current?.length) {
+          /* still empty */
+        }
+        notifyInflightRef._lastChanged = changed;
 
         const lastRead = notifyLastReadRef.current || 0;
         const unread = items.filter((it) => Number(it.ts) > lastRead).length;
@@ -3225,13 +3627,15 @@ function AppInner() {
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
           handleLogout();
-          return;
+          return false;
         }
         if (!silent) console.warn('Fetch notifications failed', error.message);
+        notifyInflightRef._lastChanged = false;
       } finally {
         notifyInflightRef.current = false;
         if (!silent && mountedRef.current) setNotifyLoading(false);
       }
+      return !!notifyInflightRef._lastChanged;
     },
     [
       handleLogout,
@@ -3879,9 +4283,9 @@ function AppInner() {
   );
 
   const fetchStationStats = useCallback(
-    async ({ silent = true } = {}) => {
+    async ({ silent = true, force = false } = {}) => {
       const token = authTokenRef.current;
-      if (!token || !canStatsTab) return;
+      if (!token || !canStatsTab) return false;
       const role = userRoleRef.current || '';
       const station =
         role === 'OWNER'
@@ -3889,31 +4293,42 @@ function AppInner() {
           : STATION_IDS.includes(role)
             ? role
             : statsStation;
-      if (!station || !STATION_IDS.includes(station)) return;
+      if (!station || !STATION_IDS.includes(station)) return false;
 
       // Silent polls skip if a request is already in flight for any station
-      if (silent && statsInflightRef.current) return;
+      if (silent && !force && statsInflightRef.current) return false;
 
       const gen = ++statsFetchGenRef.current;
       statsInflightRef.current = true;
+      let changed = false;
 
-      // Paint cached stats immediately (tab switch / offline)
-      try {
-        const cached = await cacheGet('stats', station);
-        if (
-          gen === statsFetchGenRef.current &&
-          cacheUsable(cached) &&
-          cached.data &&
-          mountedRef.current
-        ) {
-          // Only apply if payload matches this station (avoid cross-radio flash)
-          const cachedSt = cached.data?.station;
-          if (!cachedSt || cachedSt === station) {
-            setStatsPayload(cached.data);
-          }
+      // Pull-to-refresh / force: drop cache so numbers aren't sticky
+      if (force) {
+        try {
+          await cacheRemove('stats', station);
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
+      }
+
+      // Paint cached stats immediately (tab switch / offline) — skip when force
+      if (!force) {
+        try {
+          const cached = await cacheGet('stats', station);
+          if (
+            gen === statsFetchGenRef.current &&
+            cacheUsable(cached) &&
+            cached.data &&
+            mountedRef.current
+          ) {
+            const cachedSt = cached.data?.station;
+            if (!cachedSt || cachedSt === station) {
+              setStatsPayload(cached.data);
+            }
+          }
+        } catch {
+          /* ignore */
+        }
       }
       if (!silent && mountedRef.current && gen === statsFetchGenRef.current) {
         setStatsLoading(true);
@@ -3924,17 +4339,23 @@ function AppInner() {
           { token, timeoutMs: 15000 }
         );
         // Drop late responses after station switch / logout
-        if (!mountedRef.current || gen !== statsFetchGenRef.current) return;
+        if (!mountedRef.current || gen !== statsFetchGenRef.current) return false;
         const payload = data && typeof data === 'object' ? data : null;
-        if (payload && payload.station && payload.station !== station) return;
-        setStatsPayload(payload);
-        if (payload) cacheSet('stats', station, payload).catch(() => {});
+        if (payload && payload.station && payload.station !== station) return false;
+        // Smart: only setState if numbers actually moved
+        const fp = JSON.stringify(payload?.stats || payload || null);
+        changed = force || fp !== statsFpRef.current;
+        if (changed) {
+          statsFpRef.current = fp;
+          setStatsPayload(payload);
+          if (payload) cacheSet('stats', station, payload).catch(() => {});
+        }
       } catch (error) {
-        if (!mountedRef.current || gen !== statsFetchGenRef.current) return;
+        if (!mountedRef.current || gen !== statsFetchGenRef.current) return false;
         if (error.code === 'UNAUTHORIZED') handleLogout();
         else if (!silent) {
           const peek = cachePeek('stats', station);
-          if (!cacheUsable(peek)) {
+          if (!cacheUsable(peek) || force) {
             showBanner(error.message || 'Stats failed', 'warn');
           }
         }
@@ -3944,6 +4365,7 @@ function AppInner() {
           if (mountedRef.current && !silent) setStatsLoading(false);
         }
       }
+      return changed;
     },
     [canStatsTab, statsStation, handleLogout, showBanner]
   );
@@ -4331,6 +4753,39 @@ function AppInner() {
     if (f === 'banned' || f === 'ban') list = list.filter((u) => !!u.banned);
     else if (f === 'ranks' || f === 'ranked' || f === 'staff') {
       list = list.filter((u) => (u.rank || 'guest').toLowerCase() !== 'guest');
+    } else if (f === 'gold' || f === 'tips' || f === 'tip' || f === 'tiplead') {
+      // Leaderboard: most gold tipped
+      list = list
+        .filter((u) => Number(u.gold_tipped || 0) > 0)
+        .slice()
+        .sort(
+          (a, b) =>
+            Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
+            Number(b.bank || 0) - Number(a.bank || 0) ||
+            String(a.username || '').localeCompare(String(b.username || ''))
+        );
+    } else if (f === 'time' || f === 'room' || f === 'room_time' || f === 'minutes') {
+      // Leaderboard: highest room time first
+      list = list
+        .filter((u) => Number(u.room_minutes || 0) > 0)
+        .slice()
+        .sort(
+          (a, b) =>
+            Number(b.room_minutes || 0) - Number(a.room_minutes || 0) ||
+            Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
+            String(a.username || '').localeCompare(String(b.username || ''))
+        );
+    } else if (f === 'bank' || f === 'balance' || f === 'goldbank') {
+      // Leaderboard: most bank gold
+      list = list
+        .filter((u) => Number(u.bank || 0) > 0)
+        .slice()
+        .sort(
+          (a, b) =>
+            Number(b.bank || 0) - Number(a.bank || 0) ||
+            Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
+            String(a.username || '').localeCompare(String(b.username || ''))
+        );
     } else if (f !== 'all' && f) {
       list = list.filter((u) => (u.rank || '').toLowerCase() === f);
     }
@@ -4947,48 +5402,52 @@ function AppInner() {
 
   // --- TERMINAL ---
 
+  const logsFpRef = useRef('');
+  const logsInflightRef = useRef(false);
+
   const fetchLogs = useCallback(
     async (processId) => {
       const token = authTokenRef.current;
-      if (!token || !processId) return;
+      if (!token || !processId) return false;
+      if (logsInflightRef.current) return false;
+      logsInflightRef.current = true;
       try {
         const data = await apiFetch(
-          `/logs?target=${encodeURIComponent(processId)}&limit=120`,
-          { token, timeoutMs: 12000 }
+          `/logs?target=${encodeURIComponent(processId)}&limit=${LOGS_FETCH_LIMIT}`,
+          { token, timeoutMs: 10000 }
         );
-        if (!mountedRef.current) return;
-        let next = Array.isArray(data) ? data : [];
-        // Normalize API rows
-        next = next
-          .map((row) => {
-            if (typeof row === 'string') return { text: row, type: 'info' };
-            if (row && typeof row === 'object') {
-              return {
-                text: String(row.text ?? row.line ?? row.msg ?? ''),
-                type: String(row.type || 'info'),
-              };
-            }
-            return null;
-          })
-          .filter((r) => r && r.text);
-        setLiveLogs((prev) => {
-          if (prev.length === next.length && prev.length > 0) {
-            const a = prev[prev.length - 1];
-            const b = next[next.length - 1];
-            if (a?.text === b?.text && prev[0]?.text === next[0]?.text) return prev;
+        if (!mountedRef.current) return false;
+        const raw = Array.isArray(data) ? data : [];
+        // Normalize API rows (single pass, no filter alloc when empty)
+        const next = [];
+        for (let i = 0; i < raw.length; i += 1) {
+          const row = raw[i];
+          if (typeof row === 'string') {
+            if (row) next.push({ text: row, type: 'info' });
+          } else if (row && typeof row === 'object') {
+            const text = String(row.text ?? row.line ?? row.msg ?? '');
+            if (text) next.push({ text, type: String(row.type || 'info') });
           }
-          if (prev.length === 0 && next.length === 0) return prev;
-          return next;
-        });
+        }
+        const fp = fingerprintLogs(next);
+        const changed = fp !== logsFpRef.current;
+        if (changed) {
+          logsFpRef.current = fp;
+          setLiveLogs(next);
+        }
+        return changed;
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') handleLogout();
         else if (mountedRef.current) {
           setLiveLogs((prev) => {
             const msg = error.message || 'Log fetch failed';
-            if (prev.length === 1 && prev[0]?.text === msg) return prev;
+            if (prev.length === 1 && prev[0]?.text === `⚠️ ${msg}`) return prev;
             return [{ text: `⚠️ ${msg}`, type: 'error' }];
           });
         }
+        return false;
+      } finally {
+        logsInflightRef.current = false;
       }
     },
     [handleLogout]
@@ -5000,6 +5459,7 @@ function AppInner() {
         Alert.alert(t('err.forbidden'), t('manage.noLogs'));
         return;
       }
+      logsFpRef.current = '';
       setSelectedProcess(process);
       setLiveLogs([]);
       setCommandInput('');
@@ -5010,6 +5470,7 @@ function AppInner() {
   );
 
   const closeTerminal = useCallback(() => {
+    logsFpRef.current = '';
     setTerminalVisible(false);
     setSelectedProcess(null);
     setLiveLogs([]);
@@ -5248,8 +5709,11 @@ function AppInner() {
 
   // --- LIFECYCLE ---
 
-  // Pause heavy polls when backgrounded; still pull notify feed for local OS alerts
-  // (Android without FCM + iOS without APNs / no Apple Developer account)
+  // Pause heavy polls when backgrounded; still pull notify feed for local OS alerts.
+  // IMPORTANT dual-platform AppState:
+  //  - iOS `inactive` = Control Center / app switcher (user may still look) → do NOT start bg interval
+  //  - iOS/Android `background` = truly away → bg notify poll if JS stays alive
+  //  - Android often keeps JS longer; iOS suspends quickly (BackgroundFetch is the real path)
   const bgPollIntervalRef = useRef(null);
   useEffect(() => {
     const clearBgPoll = () => {
@@ -5261,16 +5725,27 @@ function AppInner() {
     const onChange = (next) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
-      if (prev.match(/inactive|background/) && next === 'active') {
+      const wasAway = prev === 'background' || prev === 'inactive';
+      const nowActive = next === 'active';
+      const nowBg = next === 'background';
+
+      if (wasAway && nowActive) {
         clearBgPoll();
-        // Coming back: quiet refresh, reset fail counter
         netFailCountRef.current = 0;
+        // Boost adaptive polls after return (both platforms)
+        try {
+          statusBudgetRef.current?.boost?.();
+          streamsBudgetRef.current?.boost?.();
+          notifyBudgetRef.current?.boost?.();
+        } catch {
+          /* ignore */
+        }
         if (authTokenRef.current) {
           fetchStatus(false);
           fetchNotifications({ silent: true });
           fetchChatChannels();
           if (userRoleRef.current === 'OWNER') fetchAdmin();
-          // Re-try push registration if previous attempt failed
+          // Resume audio session if user was listening (iOS often suspends AV)
           if (!IS_EXPO_GO && !pushOkRef.current) {
             registerForPushNotificationsAsync(authTokenRef.current);
           }
@@ -5278,18 +5753,22 @@ function AppInner() {
             startBackgroundNotifyFetch().catch(() => {});
           }
         }
-      } else if (next.match(/inactive|background/) && authTokenRef.current) {
-        // Immediate poll when leaving foreground (local OS notification if new feed items)
+        // Audio resume on active is handled by the dedicated AppState+listen effect below
+      } else if (nowBg && authTokenRef.current) {
+        // True background only (not iOS inactive / Control Center)
         if (!IS_EXPO_GO) {
           pollNotifyOnceInBackground().catch(() => {});
           clearBgPoll();
-          // Keep polling while OS keeps JS alive (Android ~OK; iOS often suspends quickly)
           const intervalMs = IS_IOS ? BG_POLL_MS_IOS : BG_POLL_MS_ANDROID;
           bgPollIntervalRef.current = setInterval(() => {
             if (!authTokenRef.current) return;
+            if (appStateRef.current !== 'background') return;
             pollNotifyOnceInBackground().catch(() => {});
           }, intervalMs);
         }
+      } else if (next === 'inactive') {
+        // iOS Control Center — leave foreground polls alone (smartPoll slows itself)
+        clearBgPoll();
       }
     };
     const sub = AppState.addEventListener('change', onChange);
@@ -5329,17 +5808,485 @@ function AppInner() {
   const onAlertsTab = mainTab === 'alerts' || notifyFeedVisible;
   const onChatTab = mainTab === 'chat';
 
-  // Status: fast on Radios tab, idle elsewhere (still keeps dashboard counts fresh enough)
+  const listenAllowedStations = useMemo(() => {
+    if (isOwner || isMasterLogin) return STATION_IDS;
+    const role = userRole || '';
+    if (STATION_IDS.includes(role)) return [role];
+    return STATION_IDS;
+  }, [isOwner, isMasterLogin, userRole]);
+
+  // Keep streams map in a ref so play() always sees latest without re-bind races
+  useEffect(() => {
+    streamsMapRef.current = streamsMap || {};
+  }, [streamsMap]);
+
+  useEffect(() => {
+    listenPlayingRef.current = listenPlaying;
+  }, [listenPlaying]);
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const ensureAudioMode = useCallback(async (force = false) => {
+    if (audioModeReadyRef.current && !force) return;
+    // Dual-platform Icecast listen:
+    //  - iOS: silent switch, background audio (UIBackgroundModes: audio)
+    //  - Android: speaker (not earpiece), duck other apps, media playback FGS perm
+    const base = {
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+    };
+    try {
+      await Audio.setAudioModeAsync({
+        ...base,
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      });
+      audioModeReadyRef.current = true;
+    } catch (e) {
+      try {
+        await Audio.setAudioModeAsync(base);
+        audioModeReadyRef.current = true;
+      } catch (e2) {
+        console.warn('Audio mode', e2?.message || e?.message || e2);
+      }
+    }
+  }, []);
+
+  const unloadSound = useCallback(async (snd) => {
+    if (!snd) return;
+    try {
+      await snd.stopAsync();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await snd.unloadAsync();
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const stopRadioStream = useCallback(async () => {
+    clearReconnectTimer();
+    listenWantRef.current = false;
+    reconnectAttemptsRef.current = 0;
+    playGenRef.current += 1; // cancel in-flight play
+    const snd = soundRef.current;
+    soundRef.current = null;
+    listenPlayingRef.current = false;
+    setListenPlaying(false);
+    setListenLoading(false);
+    await unloadSound(snd);
+  }, [clearReconnectTimer, unloadSound]);
+
+  const scheduleReconnect = useCallback(
+    (station, gen) => {
+      if (!listenWantRef.current) return;
+      if (gen !== playGenRef.current) return;
+      // Already waiting on a reconnect timer — don't burn attempts on spam errors
+      if (reconnectTimerRef.current) return;
+      if (reconnectAttemptsRef.current >= MAX_RADIO_RECONNECTS) {
+        // Give up cleanly so Play button works again
+        listenWantRef.current = false;
+        listenPlayingRef.current = false;
+        reconnectAttemptsRef.current = 0;
+        if (mountedRef.current) {
+          setListenPlaying(false);
+          setListenLoading(false);
+        }
+        return;
+      }
+      reconnectAttemptsRef.current += 1;
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!listenWantRef.current) return;
+        if (gen !== playGenRef.current) return;
+        if (!mountedRef.current) return;
+        // Soft reconnect without user alert
+        playRadioStreamRef.current?.(station, { silent: true, isRetry: true });
+      }, 2500);
+    },
+    []
+  );
+
+  // Filled after playRadioStream is defined
+  const playRadioStreamRef = useRef(null);
+
+  const playRadioStream = useCallback(
+    async (station, { silent = false, isRetry = false } = {}) => {
+      const st =
+        station && STATION_IDS.includes(station)
+          ? station
+          : listenStationRef.current || 'RADIO1';
+      listenStationRef.current = st;
+      setListenStation(st);
+      listenWantRef.current = true;
+      clearReconnectTimer();
+      // Fresh manual play resets reconnect budget
+      if (!isRetry) reconnectAttemptsRef.current = 0;
+
+      const gen = ++playGenRef.current;
+      const url = resolveStationStreamUrl(st, streamsMapRef.current);
+      if (!url) {
+        listenWantRef.current = false;
+        listenPlayingRef.current = false;
+        setListenPlaying(false);
+        setListenLoading(false);
+        if (!silent) {
+          Alert.alert(t('radio.listen'), t('radio.offline'));
+        }
+        return;
+      }
+      // Stable URL first (best for Icecast); only cache-bust on retry
+      const playUrl = isRetry
+        ? url.includes('?')
+          ? `${url}&_=${Date.now()}`
+          : `${url}?_=${Date.now()}`
+        : url;
+
+      setListenLoading(true);
+      try {
+        await ensureAudioMode(false);
+        if (gen !== playGenRef.current || !listenWantRef.current) return;
+
+        // Stop previous stream first (one station at a time)
+        const prev = soundRef.current;
+        soundRef.current = null;
+        if (prev) await unloadSound(prev);
+        if (gen !== playGenRef.current || !listenWantRef.current) return;
+
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: playUrl },
+          {
+            shouldPlay: true,
+            isLooping: false,
+            // iOS: slightly slower status ticks save battery; Android ExoPlayer is fine at 2s
+            progressUpdateIntervalMillis: IS_IOS ? 2000 : 1800,
+            volume: 1.0,
+            // Default player: ExoPlayer (Android) / AVPlayer (iOS) — best for Icecast MPEG
+          },
+          (status) => {
+            if (gen !== playGenRef.current) return;
+            if (!status) return;
+            if (!status.isLoaded) {
+              if (status.error && listenWantRef.current) {
+                console.warn('stream status error', status.error);
+                listenPlayingRef.current = false;
+                if (mountedRef.current) setListenPlaying(false);
+                // Only one reconnect schedule per gen (timer cleared each time)
+                scheduleReconnect(st, gen);
+              }
+              return;
+            }
+            if (status.isPlaying) {
+              // Healthy stream — reset reconnect budget
+              reconnectAttemptsRef.current = 0;
+              listenPlayingRef.current = true;
+              if (mountedRef.current) setListenPlaying(true);
+            }
+            // Live streams should not finish; if they do, reconnect
+            if (status.didJustFinish && listenWantRef.current) {
+              listenPlayingRef.current = false;
+              if (mountedRef.current) setListenPlaying(false);
+              scheduleReconnect(st, gen);
+            }
+          }
+        );
+
+        if (gen !== playGenRef.current || !listenWantRef.current) {
+          await unloadSound(sound);
+          return;
+        }
+
+        soundRef.current = sound;
+        // Ensure playback actually started (some devices need a kick)
+        try {
+          const st0 = await sound.getStatusAsync();
+          if (st0?.isLoaded && !st0.isPlaying) {
+            await sound.playAsync();
+          }
+        } catch {
+          /* ignore */
+        }
+        if (gen !== playGenRef.current || !listenWantRef.current) {
+          await unloadSound(sound);
+          if (soundRef.current === sound) soundRef.current = null;
+          return;
+        }
+        reconnectAttemptsRef.current = 0;
+        listenPlayingRef.current = true;
+        setListenPlaying(true);
+      } catch (e) {
+        if (gen !== playGenRef.current) return;
+        listenPlayingRef.current = false;
+        setListenPlaying(false);
+        // Auto-retry with cache-bust (budget via scheduleReconnect)
+        if (listenWantRef.current && reconnectAttemptsRef.current < MAX_RADIO_RECONNECTS) {
+          scheduleReconnect(st, gen);
+        } else {
+          // Final failure — clear want so next Play works
+          listenWantRef.current = false;
+          reconnectAttemptsRef.current = 0;
+          if (!silent) {
+            const msg = e?.message || String(e);
+            Alert.alert(
+              t('radio.listen'),
+              t('radio.error', { msg: String(msg).slice(0, 160) })
+            );
+          }
+        }
+      } finally {
+        // Always clear loading for this generation (or if superseded, stop() already cleared)
+        if (mountedRef.current && gen === playGenRef.current) {
+          setListenLoading(false);
+        }
+      }
+    },
+    [clearReconnectTimer, ensureAudioMode, scheduleReconnect, t, unloadSound]
+  );
+
+  playRadioStreamRef.current = playRadioStream;
+
+  const toggleRadioPlay = useCallback(async () => {
+    if (listenLoading) {
+      // Tap during load = cancel
+      await stopRadioStream();
+      return;
+    }
+    // Only Stop when actually playing (not when stuck in want/reconnect limbo)
+    if (listenPlayingRef.current) {
+      await stopRadioStream();
+      return;
+    }
+    // Clear stale want from failed reconnects, then play
+    listenWantRef.current = false;
+    await playRadioStream(listenStationRef.current, { silent: false });
+  }, [listenLoading, playRadioStream, stopRadioStream]);
+
+  const selectListenStation = useCallback(
+    async (st) => {
+      if (!st || !STATION_IDS.includes(st)) return;
+      if (listenAllowedStations.length && !listenAllowedStations.includes(st)) {
+        return;
+      }
+      const wasPlaying = listenPlayingRef.current || !!soundRef.current;
+      listenStationRef.current = st;
+      setListenStation(st);
+      if (wasPlaying) {
+        await playRadioStream(st, { silent: false });
+      }
+    },
+    [listenAllowedStations, playRadioStream]
+  );
+
+  const fetchStreams = useCallback(
+    async ({ silent = true } = {}) => {
+      const token = authTokenRef.current;
+      if (!token) return false;
+      if (streamsInflightRef.current) return false;
+      streamsInflightRef.current = true;
+      try {
+        // Memory-only paint (no await AsyncStorage on every poll — was a major jank source)
+        if (!streamsMapRef.current || !Object.keys(streamsMapRef.current).length) {
+          try {
+            const peek = cachePeek('streams', '');
+            if (cacheUsable(peek) && peek.data?.stations && mountedRef.current) {
+              setStreamsMap(peek.data.stations);
+              streamsMapRef.current = peek.data.stations;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        const data = await apiFetch('/streams', {
+          token,
+          timeoutMs: 9000,
+        });
+        if (!mountedRef.current) return false;
+        const map =
+          data?.stations && typeof data.stations === 'object'
+            ? data.stations
+            : {};
+        // Skip React setState when nothing visible changed
+        const prev = streamsMapRef.current || {};
+        let changed = false;
+        const keys = Object.keys(map);
+        const prevKeys = Object.keys(prev);
+        if (keys.length !== prevKeys.length) changed = true;
+        else {
+          for (let i = 0; i < keys.length; i += 1) {
+            const k = keys[i];
+            const a = map[k] || {};
+            const b = prev[k] || {};
+            if (
+              a.title !== b.title ||
+              a.listeners !== b.listeners ||
+              a.online !== b.online ||
+              a.stream_url !== b.stream_url ||
+              a.server_name !== b.server_name
+            ) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        streamsMapRef.current = map;
+        const fp = fingerprintStreams(map, listenStationRef.current);
+        const streamsChanged = fp !== streamsFpRef.current || changed;
+        if (streamsChanged) streamsFpRef.current = fp;
+        if (changed) setStreamsMap(map);
+        if (changed) {
+          cacheSet('streams', '', { stations: map, as_of: data?.as_of }).catch(
+            () => {}
+          );
+        }
+        // Keep listen station valid for this role
+        const role = userRoleRef.current || '';
+        if (role && role !== 'OWNER' && STATION_IDS.includes(role)) {
+          if (listenStationRef.current !== role) {
+            listenStationRef.current = role;
+            setListenStation(role);
+          }
+        }
+        streamsInflightRef._lastChanged = streamsChanged;
+      } catch (error) {
+        if (error?.code === 'UNAUTHORIZED') handleLogout();
+        else if (!silent) {
+          /* soft fail — player can still use fallback URLs */
+        }
+        streamsInflightRef._lastChanged = false;
+      } finally {
+        streamsInflightRef.current = false;
+      }
+      return !!streamsInflightRef._lastChanged;
+    },
+    [handleLogout]
+  );
+
+  // Unload audio on logout / unmount
+  useEffect(() => {
+    return () => {
+      clearReconnectTimer();
+      listenWantRef.current = false;
+      playGenRef.current += 1;
+      const snd = soundRef.current;
+      soundRef.current = null;
+      if (snd) {
+        snd.stopAsync?.().catch?.(() => {});
+        snd.unloadAsync?.().catch?.(() => {});
+      }
+    };
+  }, [clearReconnectTimer]);
+
+  // Resume audio after return to foreground (iOS suspends AV; Android may duck/kill)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return;
+      if (!listenWantRef.current) return;
+      // Re-apply audio session (critical on iPhone silent switch / background audio)
+      ensureAudioMode(true)
+        .catch(() => {})
+        .finally(() => {
+          if (!listenWantRef.current) return;
+          const snd = soundRef.current;
+          if (!snd) {
+            playRadioStreamRef.current?.(listenStationRef.current, {
+              silent: true,
+              isRetry: true,
+            });
+            return;
+          }
+          snd
+            .getStatusAsync()
+            .then((st) => {
+              if (!listenWantRef.current) return;
+              if (!st?.isLoaded || !st.isPlaying) {
+                playRadioStreamRef.current?.(listenStationRef.current, {
+                  silent: true,
+                  isRetry: true,
+                });
+              } else {
+                // Ensure volume/play after iOS interruption
+                snd.setStatusAsync({ shouldPlay: true, volume: 1.0 }).catch(() => {});
+              }
+            })
+            .catch(() => {
+              if (listenWantRef.current) {
+                playRadioStreamRef.current?.(listenStationRef.current, {
+                  silent: true,
+                  isRetry: true,
+                });
+              }
+            });
+        });
+    });
+    return () => sub.remove();
+  }, [ensureAudioMode]);
+
+  // —— Smart adaptive status poll (snappy when processes change, calm when quiet)
   useEffect(() => {
     if (!isUnlocked) return undefined;
-    fetchStatus(true);
-    const ms = onRadiosTab ? POLL_STATUS_MS : POLL_STATUS_IDLE_MS;
-    const interval = setInterval(() => {
-      if (appStateRef.current !== 'active') return;
-      fetchStatus(false);
-    }, ms);
-    return () => clearInterval(interval);
+    const budget = statusBudgetRef.current;
+    budget.boost();
+    // Active Radios tab → lower max; elsewhere allow slower
+    const minMs = onRadiosTab ? POLL_STATUS_MS : POLL_STATUS_IDLE_MS;
+    const maxMs = onRadiosTab ? POLL_STATUS_IDLE_MS : POLL_STATUS_MAX_MS;
+    statusBudgetRef.current = createAdaptiveBudget({
+      minMs,
+      maxMs,
+      quietBeforeSlow: 2,
+    });
+    return startSmartLoop(
+      async () => {
+        const changed = await fetchStatus(false);
+        return changed === true;
+      },
+      {
+        budget: statusBudgetRef.current,
+        enabled: () => !!authTokenRef.current && mountedRef.current,
+        getAppState: () => appStateRef.current,
+        immediate: true,
+      }
+    );
   }, [isUnlocked, fetchStatus, onRadiosTab]);
+
+  // —— Smart streams (now playing + listeners): fast while listening, calms when title stable
+  useEffect(() => {
+    if (!isUnlocked) return undefined;
+    const minMs = listenPlaying
+      ? POLL_STREAMS_FAST_MS
+      : onRadiosTab
+        ? POLL_STREAMS_IDLE_MS
+        : 20000;
+    const maxMs = listenPlaying ? 12000 : POLL_STREAMS_MAX_MS;
+    streamsBudgetRef.current = createAdaptiveBudget({
+      minMs,
+      maxMs,
+      quietBeforeSlow: 2,
+      stepUp: 1.5,
+    });
+    streamsBudgetRef.current.boost();
+    return startSmartLoop(
+      async () => {
+        const changed = await fetchStreams({ silent: true });
+        return changed === true;
+      },
+      {
+        budget: streamsBudgetRef.current,
+        enabled: () => !!authTokenRef.current && mountedRef.current,
+        getAppState: () => appStateRef.current,
+        immediate: true,
+      }
+    );
+  }, [isUnlocked, fetchStreams, onRadiosTab, listenPlaying]);
 
   useEffect(() => {
     if (!isUnlocked || !isOwner) return undefined;
@@ -5351,41 +6298,85 @@ function AppInner() {
     return () => clearInterval(interval);
   }, [isUnlocked, isOwner, fetchAdmin]);
 
-  // Notifications: fast on Alerts, slow badge-only elsewhere
+  // —— Smart notifications: faster on Alerts tab / when new items appear
   useEffect(() => {
     if (!isUnlocked) return undefined;
-    fetchNotifications({ silent: true });
-    const ms = onAlertsTab ? POLL_NOTIFY_MS : POLL_NOTIFY_IDLE_MS;
-    const interval = setInterval(() => {
-      if (appStateRef.current !== 'active') return;
-      fetchNotifications({ silent: true });
-    }, ms);
-    return () => clearInterval(interval);
+    const minMs = onAlertsTab ? POLL_NOTIFY_MS : POLL_NOTIFY_IDLE_MS;
+    const maxMs = onAlertsTab ? 16000 : POLL_NOTIFY_MAX_MS;
+    notifyBudgetRef.current = createAdaptiveBudget({
+      minMs,
+      maxMs,
+      quietBeforeSlow: 3,
+    });
+    notifyBudgetRef.current.boost();
+    return startSmartLoop(
+      async () => {
+        const changed = await fetchNotifications({ silent: true });
+        return changed === true;
+      },
+      {
+        budget: notifyBudgetRef.current,
+        enabled: () => !!authTokenRef.current && mountedRef.current,
+        getAppState: () => appStateRef.current,
+        immediate: true,
+      }
+    );
   }, [isUnlocked, fetchNotifications, onAlertsTab]);
 
-  // Chat channel list: fast on Chat tab; slower elsewhere for badge only
+  // Chat channel list — adaptive (badge-only when not on chat tab)
   useEffect(() => {
     if (!isUnlocked) return undefined;
     if (onChatTab) fetchChatChannels();
-    const ms = onChatTab ? POLL_CHAT_LIST_MS : POLL_CHAT_LIST_IDLE_MS;
-    const interval = setInterval(() => {
-      if (appStateRef.current !== 'active') return;
-      fetchChatChannels();
-    }, ms);
-    return () => clearInterval(interval);
+    const budget = createAdaptiveBudget({
+      minMs: onChatTab ? POLL_CHAT_LIST_MS : POLL_CHAT_LIST_IDLE_MS,
+      maxMs: onChatTab ? 18000 : 40000,
+      quietBeforeSlow: 3,
+      stepUp: 1.5,
+      bgFloorMs: 30000,
+    });
+    return startSmartLoop(
+      async () => {
+        await fetchChatChannels();
+        return false; // list equality handled inside; don't thrash delay
+      },
+      {
+        budget,
+        enabled: () => !!authTokenRef.current && mountedRef.current,
+        getAppState: () => appStateRef.current,
+        immediate: false,
+      }
+    );
   }, [isUnlocked, fetchChatChannels, onChatTab]);
 
+  // Active chat messages + typing — adaptive smart loop
   useEffect(() => {
     if (!isUnlocked || !activeChat?.id) return undefined;
     const id = activeChat.id;
     fetchChatMessages(id, { silent: true });
     fetchTyping();
-    const interval = setInterval(() => {
-      if (appStateRef.current !== 'active') return;
-      fetchChatMessages(id, { silent: true });
-      fetchTyping();
-    }, POLL_CHAT_MS);
-    return () => clearInterval(interval);
+    const budget = createAdaptiveBudget({
+      minMs: POLL_CHAT_MS,
+      maxMs: POLL_CHAT_MAX_MS,
+      quietBeforeSlow: 2,
+      stepUp: 1.45,
+      bgFloorMs: 25000,
+    });
+    return startSmartLoop(
+      async () => {
+        await fetchChatMessages(id, { silent: true });
+        fetchTyping();
+        return false;
+      },
+      {
+        budget,
+        enabled: () =>
+          !!authTokenRef.current &&
+          mountedRef.current &&
+          activeChatIdRef.current === id,
+        getAppState: () => appStateRef.current,
+        immediate: false,
+      }
+    );
   }, [isUnlocked, activeChat?.id, fetchChatMessages, fetchTyping]);
 
   // Notification tap / receive
@@ -5462,14 +6453,32 @@ function AppInner() {
     showBanner,
   ]);
 
+  // Terminal logs — adaptive (fast while lines arrive, calm when idle)
   useEffect(() => {
     if (!terminalVisible || !selectedProcess?.id) return undefined;
     const id = selectedProcess.id;
-    const logInterval = setInterval(() => {
-      if (appStateRef.current !== 'active') return;
-      fetchLogs(id);
-    }, POLL_LOGS_MS);
-    return () => clearInterval(logInterval);
+    const budget = createAdaptiveBudget({
+      minMs: POLL_LOGS_MS,
+      maxMs: POLL_LOGS_MAX_MS,
+      quietBeforeSlow: 2,
+      stepUp: 1.5,
+      bgFloorMs: 20000,
+    });
+    return startSmartLoop(
+      async () => {
+        const changed = await fetchLogs(id);
+        return changed === true;
+      },
+      {
+        budget,
+        enabled: () =>
+          !!authTokenRef.current &&
+          mountedRef.current &&
+          terminalVisible,
+        getAppState: () => appStateRef.current,
+        immediate: false,
+      }
+    );
   }, [terminalVisible, selectedProcess?.id, fetchLogs]);
 
   // When user opens system alerts tab / modal, mark as read
@@ -5564,27 +6573,25 @@ function AppInner() {
     return processes.filter((p) => p.id.toUpperCase().startsWith(roleUpper));
   }, [processes, userRole, isOwner]);
 
-  const activeCount = useMemo(
-    () => visibleProcesses.filter((p) => p.status === 'RUNNING').length,
-    [visibleProcesses]
-  );
-  const stoppedCount = useMemo(
-    () => visibleProcesses.filter((p) => p.status === 'STOPPED' || (!p.status)).length,
-    [visibleProcesses]
-  );
-  const errorCount = useMemo(
-    () => visibleProcesses.filter((p) => p.status === 'ERROR').length,
-    [visibleProcesses]
-  );
-  // leftover non-running non-error (unknown statuses)
-  const otherDown = useMemo(
-    () =>
-      visibleProcesses.filter(
-        (p) => p.status !== 'RUNNING' && p.status !== 'STOPPED' && p.status !== 'ERROR'
-      ).length,
-    [visibleProcesses]
-  );
-  const offlineCount = stoppedCount + otherDown;
+  // Single-pass counts (was 4× full filter walks every process update)
+  const { activeCount, offlineCount, errorCount } = useMemo(() => {
+    let active = 0;
+    let stopped = 0;
+    let errors = 0;
+    let other = 0;
+    for (let i = 0; i < visibleProcesses.length; i += 1) {
+      const st = visibleProcesses[i]?.status;
+      if (st === 'RUNNING') active += 1;
+      else if (st === 'ERROR') errors += 1;
+      else if (st === 'STOPPED' || !st) stopped += 1;
+      else other += 1;
+    }
+    return {
+      activeCount: active,
+      offlineCount: stopped + other,
+      errorCount: errors,
+    };
+  }, [visibleProcesses]);
 
   const groupedData = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -5664,9 +6671,12 @@ function AppInner() {
     [groupedData]
   );
 
+  // Do NOT put now-playing title/listeners here — that re-rendered every process
+  // card on every Icecast poll. RadioPlayerBar sits outside SectionList.
   const processExtraData = useMemo(
-    () => `${statusLoaded ? 1 : 0}|${statusFilter}|${searchQuery}|${connectionOk ? 1 : 0}`,
-    [statusLoaded, statusFilter, searchQuery, connectionOk]
+    () =>
+      `${statusLoaded ? 1 : 0}|${statusFilter}|${searchQuery}|${connectionOk ? 1 : 0}|${canControlRadios ? 1 : 0}`,
+    [statusLoaded, statusFilter, searchQuery, connectionOk, canControlRadios]
   );
 
   const renderLogItem = useCallback(({ item }) => {
@@ -5743,14 +6753,18 @@ function AppInner() {
   );
 
   const renderUserItem = useCallback(
-    ({ item }) => (
+    ({ item, index }) => (
       <UserRow
         item={item}
-        stationFallback={effectiveUsersStation}
         onPress={openStationUser}
+        leaderboardPlace={
+          USER_LEADERBOARD_FILTERS.has((usersFilter || '').toLowerCase())
+            ? index + 1
+            : 0
+        }
       />
     ),
-    [effectiveUsersStation, openStationUser]
+    [openStationUser, usersFilter]
   );
 
   const userKeyExtractor = useCallback(
@@ -5765,26 +6779,23 @@ function AppInner() {
 
   const listPerfProps = useMemo(
     () => ({
-      // 1.3.4: smaller windows = less JS/layout per frame on mid devices
-      initialNumToRender: IS_ANDROID ? 8 : 10,
-      maxToRenderPerBatch: IS_ANDROID ? 4 : 5,
-      updateCellsBatchingPeriod: IS_ANDROID ? 120 : 90,
-      windowSize: IS_ANDROID ? 5 : 6,
-      // removeClippedSubviews: blank lists on Android + some iOS tab switches
-      removeClippedSubviews: false,
+      // Virtualization tuned per platform (mid Android GPUs + iPhone 60/120Hz)
+      initialNumToRender: IS_ANDROID ? 6 : 8,
+      maxToRenderPerBatch: IS_ANDROID ? 3 : 4,
+      updateCellsBatchingPeriod: IS_ANDROID ? 100 : 70,
+      windowSize: IS_ANDROID ? 4 : 5,
       ...platformListExtras,
     }),
     []
   );
 
-  /** Heavier list (radios with cards) — keep virtualization tighter */
+  /** Heavier list (radios with cards) — tight virtualization, never blank rows */
   const radiosListPerfProps = useMemo(
     () => ({
-      initialNumToRender: IS_ANDROID ? 5 : 7,
-      maxToRenderPerBatch: IS_ANDROID ? 3 : 4,
-      updateCellsBatchingPeriod: 120,
+      initialNumToRender: IS_ANDROID ? 4 : 6,
+      maxToRenderPerBatch: IS_ANDROID ? 2 : 3,
+      updateCellsBatchingPeriod: IS_ANDROID ? 70 : 50,
       windowSize: IS_ANDROID ? 4 : 5,
-      removeClippedSubviews: false,
       ...platformListExtras,
     }),
     []
@@ -5825,13 +6836,68 @@ function AppInner() {
     isOwner,
   ]);
 
-  // Stats tab: load when opened / station changes
+  // Stats tab: smart adaptive refresh while visible
   useEffect(() => {
     if (!isUnlocked || mainTab !== 'stats' || !canStatsTab) return undefined;
-    fetchStationStats({ silent: false });
-    const id = setInterval(() => fetchStationStats({ silent: true }), 45000);
-    return () => clearInterval(id);
+    statsBudgetRef.current = createAdaptiveBudget({
+      minMs: POLL_STATS_MS,
+      maxMs: POLL_STATS_MAX_MS,
+      quietBeforeSlow: 2,
+    });
+    statsBudgetRef.current.boost();
+    statsFpRef.current = '';
+    fetchStationStats({ silent: false, force: true });
+    return startSmartLoop(
+      async () => {
+        const changed = await fetchStationStats({ silent: true });
+        return changed === true;
+      },
+      {
+        budget: statsBudgetRef.current,
+        enabled: () => !!authTokenRef.current && mountedRef.current,
+        getAppState: () => appStateRef.current,
+        immediate: false,
+      }
+    );
   }, [isUnlocked, mainTab, canStatsTab, effectiveStatsStation, fetchStationStats]);
+
+  // Intelligent prefetch: warm the next likely tab from cache/network when idle
+  useEffect(() => {
+    if (!isUnlocked || !authTokenRef.current) return undefined;
+    if (appStateRef.current !== 'active') return undefined;
+    // After a short idle on Radios, quietly warm stats + streams
+    const t = setTimeout(() => {
+      if (!mountedRef.current || !authTokenRef.current) return;
+      if (mainTab === 'radios') {
+        fetchStreams({ silent: true });
+        if (canStatsTab) fetchStationStats({ silent: true });
+      } else if (mainTab === 'stats' && canStatsTab) {
+        fetchStatus(false);
+      } else if (mainTab === 'users' && canUsersTab) {
+        // users list is heavy — only touch cache peek (no force pull)
+        try {
+          const st = effectiveUsersStation;
+          const peek = cachePeek('users', st);
+          if (!cacheUsable(peek)) {
+            // soft background fill without blocking UI
+            fetchStationUsers?.({ silent: true });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [
+    isUnlocked,
+    mainTab,
+    canStatsTab,
+    canUsersTab,
+    effectiveUsersStation,
+    fetchStreams,
+    fetchStationStats,
+    fetchStatus,
+  ]);
 
   // Security tab: poll only while visible (smooth + low load)
   useEffect(() => {
@@ -5849,6 +6915,8 @@ function AppInner() {
     return <Text style={styles.sectionHeader}>{section.title}</Text>;
   }, []);
 
+  // Radio player is OUTSIDE SectionList (see tab render) so Icecast title polls
+  // never recreate the process list header / rebind every ProcessCard.
   const listHeader = useMemo(
     () => (
       <View>
@@ -5866,7 +6934,7 @@ function AppInner() {
           </View>
         ) : null}
 
-        <View style={styles.dashboard}>
+        <View style={styles.dashboard} renderToHardwareTextureAndroid>
           <View style={[styles.dashCard, { borderBottomColor: '#10b981' }]}>
             <Text style={styles.dashNumber}>{activeCount}</Text>
             <Text style={styles.dashLabel}>{t('dash.active')}</Text>
@@ -5979,10 +7047,10 @@ function AppInner() {
     ),
     [
       banner,
+      isOwner,
       activeCount,
       offlineCount,
       errorCount,
-      isOwner,
       adminData,
       statusFilter,
       searchBarKey,
@@ -6148,6 +7216,18 @@ function AppInner() {
         {/* ===== TAB: RADIOS ===== */}
         {safeMainTab === 'radios' ? (
           <View style={styles.tabBody}>
+            {/* Isolated from SectionList — stream title ticks must not re-render cards */}
+            <RadioPlayerBar
+              stationsMap={streamsMap}
+              stationId={listenStation}
+              playing={listenPlaying}
+              loading={listenLoading}
+              isOwner={isOwner || isMasterLogin}
+              allowedStations={listenAllowedStations}
+              onSelectStation={selectListenStation}
+              onTogglePlay={toggleRadioPlay}
+              t={t}
+            />
             <SectionList
               style={styles.tabList}
               sections={processSections}
@@ -6158,17 +7238,18 @@ function AppInner() {
               stickySectionHeadersEnabled={false}
               extraData={processExtraData}
               {...radiosListPerfProps}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="on-drag"
               refreshControl={
                 <RefreshControl
                   refreshing={refreshing}
                   onRefresh={() => {
+                    // User asked for data now → boost adaptive polls
+                    statusBudgetRef.current?.boost?.();
+                    streamsBudgetRef.current?.boost?.();
                     fetchStatus(true);
+                    fetchStreams({ silent: true });
                     if (isOwner) fetchAdmin();
                   }}
-                  tintColor="#38bdf8"
-                  colors={['#38bdf8']}
+                  {...refreshControlProps}
                 />
               }
               contentContainerStyle={[
@@ -6603,7 +7684,9 @@ function AppInner() {
                 refreshControl={
                   <RefreshControl
                     refreshing={statsLoading}
-                    onRefresh={() => fetchStationStats({ silent: false })}
+                    onRefresh={() =>
+                      fetchStationStats({ silent: false, force: true })
+                    }
                     tintColor="#22d3ee"
                     colors={['#22d3ee']}
                   />
@@ -6735,6 +7818,15 @@ function AppInner() {
                       pct: s.pct_transfers_gold,
                       color: '#22d3ee',
                     },
+                    {
+                      icon: 'people-outline',
+                      label: t('stats.visitors'),
+                      hint: t('stats.hint.visitors'),
+                      value: s.visitors ?? 0,
+                      prev: s.prev_visitors ?? 0,
+                      pct: s.pct_visitors,
+                      color: '#34d399',
+                    },
                   ];
                   return (
                     <>
@@ -6797,6 +7889,14 @@ function AppInner() {
                             {fmt(life.tips_gold ?? 0)}
                           </Text>
                           <Text style={styles.statsLifeUnit}>{t('stats.unit.gold')}</Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(52,211,153,0.35)' }]}>
+                          <Ionicons name="people" size={18} color="#34d399" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.visitors')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#34d399' }]}>
+                            {fmt(life.visitors ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>{t('stats.unit.visitors')}</Text>
                         </View>
                         <View style={[styles.statsLifeCard, { borderColor: 'rgba(167,139,250,0.35)' }]}>
                           <Ionicons name="musical-notes" size={18} color="#a78bfa" />
@@ -9506,10 +10606,12 @@ const styles = StyleSheet.create({
   },
   statsLifeRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
   },
   statsLifeCard: {
     flex: 1,
+    minWidth: '28%',
     backgroundColor: 'rgba(15,23,42,0.92)',
     borderRadius: 16,
     borderWidth: 1,
@@ -9895,6 +10997,137 @@ const styles = StyleSheet.create({
   bannerOk: { backgroundColor: 'rgba(16,185,129,0.15)', borderColor: '#10b981' },
   bannerText: { color: '#e2e8f0', fontSize: 13, fontWeight: '600' },
 
+  radioPlayer: {
+    marginHorizontal: 0,
+    marginTop: 10,
+    marginBottom: 8,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(34,211,238,0.28)',
+    backgroundColor: 'rgba(8, 47, 73, 0.55)',
+    gap: 10,
+  },
+  radioPlayerHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  radioPlayerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  radioPlayerTitle: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  radioLiveDotWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginLeft: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(239,68,68,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(248,113,113,0.45)',
+  },
+  radioLiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#f87171',
+  },
+  radioLiveDotText: {
+    color: '#fecaca',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  radioListenersPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(99,102,241,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(165,180,252,0.35)',
+  },
+  radioListenersText: {
+    color: '#c7d2fe',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  radioStationChips: {
+    gap: 8,
+    paddingVertical: 2,
+    alignItems: 'center',
+  },
+  radioStationChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: 'rgba(15,23,42,0.65)',
+  },
+  radioStationChipText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  radioStationChipMeta: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  radioPlayerBody: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  radioPlayBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioNowStation: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  radioNowPlayingLabel: {
+    color: '#67e8f9',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    marginTop: 3,
+  },
+  radioNowTitle: {
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 2,
+    lineHeight: 19,
+  },
+  radioNowTitleMuted: {
+    color: '#94a3b8',
+    fontWeight: '600',
+  },
   dashboard: {
     flexDirection: 'row',
     gap: 8,
@@ -10447,6 +11680,33 @@ const styles = StyleSheet.create({
   userRowBanned: {
     borderColor: 'rgba(248,113,113,0.45)',
     backgroundColor: 'rgba(127,29,29,0.25)',
+  },
+  userLeadPlace: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: 'rgba(100,116,139,0.25)',
+    borderWidth: 1,
+    borderColor: '#475569',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  userLeadPlaceGold: {
+    backgroundColor: 'rgba(251,191,36,0.2)',
+    borderColor: '#fbbf24',
+  },
+  userLeadPlaceSilver: {
+    backgroundColor: 'rgba(148,163,184,0.2)',
+    borderColor: '#94a3b8',
+  },
+  userLeadPlaceBronze: {
+    backgroundColor: 'rgba(217,119,6,0.2)',
+    borderColor: '#d97706',
+  },
+  userLeadPlaceText: {
+    color: '#f8fafc',
+    fontSize: 12,
+    fontWeight: '900',
   },
   userRowTop: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
   userRowName: { color: '#f8fafc', fontSize: 15, fontWeight: '800', flexShrink: 1 },

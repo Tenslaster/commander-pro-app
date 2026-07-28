@@ -1,9 +1,9 @@
 # Commander PRO APK (GitHub Actions — no EAS free Android quota)
-# Actions → Android APK 1.3.8 → Run workflow → artifact CommanderPro-apk
+# Actions → Android APK → Run workflow → artifact CommanderPro-apk
 #
 # Action majors pin Node 24 runtimes (avoids "Node.js 20 is deprecated" warnings).
 
-name: Android APK 1.3.8
+name: Android APK
 
 on:
   workflow_dispatch:

@@ -1,28 +1,67 @@
-crew.kingdom.forum/downloads
-===========================
+crew.kingdom.forum — Cloudflare Tunnel map
+==========================================
 
-Public links (only these):
+Tunnel name : myradio
+Config file : C:\cloudflared\config.yml
+Credentials : C:\cloudflared\1e6a52d2-49d8-4dc0-8a8b-6a3825e0dffa.json
+Launcher    : C:\Users\cedri\OneDrive\Bureau\RadioDev\Cloudflare.bat
+  → C:\cloudflared\cloudflared.exe tunnel --config C:\cloudflared\config.yml run myradio
+
+Public routes (order matters — first match wins)
+------------------------------------------------
+  https://crew.kingdom.forum/downloads*  →  http://127.0.0.1:8787   Download server (APK/IPA)
+  https://crew.kingdom.forum/games*      →  http://127.0.0.1:8080   Games (optional)
+  https://crew.kingdom.forum/api*        →  http://127.0.0.1:9601   Commander PRO API
+  https://crew.kingdom.forum/withyou*    →  http://127.0.0.1:9610   WithYou API
+  https://crew.kingdom.forum/stream*     →  http://127.0.0.1:8000   Icecast (R1–R10 mounts)
+  https://crew.kingdom.forum/*           →  http://127.0.0.1:5000   Default site
+  (everything else)                      →  404
+
+Commander PRO download links
+----------------------------
   https://crew.kingdom.forum/downloads
   https://crew.kingdom.forum/downloads/apk
   https://crew.kingdom.forum/downloads/ipa
+  https://crew.kingdom.forum/downloads/withyou
+  https://crew.kingdom.forum/downloads/withyou/apk
+  https://crew.kingdom.forum/downloads/withyou/ipa
 
-1) Start-Download-Server.bat  (listens on 127.0.0.1:8787)
+Local services that MUST be running
+-----------------------------------
+  1) cloudflared tunnel (Cloudflare.bat / Batch Manager CLOUDFLARE slot)
+  2) Batch Manager API on :9601  (embedded when BM is open)
+  3) Download server on :8787
+       AppIPhone\iphone-batch-manager\Start-Download-Server.bat
+       or scripts\start-download-server.bat
+  4) Icecast on :8000  (for public streams)
+  5) WithYou server on :9610  (only if you use WithYou)
 
-2) Cloudflare Tunnel — route PATH /downloads* to this PC:
+Icecast mounts (match RADIO#_MOUNT in Batch_Manager .env)
+---------------------------------------------------------
+  /stream   RADIO1
+  /stream2  RADIO2
+  /stream3  RADIO3
+  /stream4  RADIO4
+  /stream5  RADIO5
+  /stream6  RADIO6
+  /stream7  RADIO7
+  /stream8  RADIO8
+  /stream9  RADIO9
+  /stream10 RADIO10
 
-Example ingress (order matters — more specific first):
+After editing C:\cloudflared\config.yml
+--------------------------------------
+  Restart cloudflared completely (only ONE instance):
+    taskkill /F /IM cloudflared.exe
+    Cloudflare.bat
 
-  ingress:
-    - hostname: crew.kingdom.forum
-      path: /downloads*
-      service: http://127.0.0.1:8787
-    - hostname: crew.kingdom.forum
-      service: http://127.0.0.1:9601   # your API (adjust if different)
-    - service: http_status:404
+  Validate:
+    C:\cloudflared\cloudflared.exe tunnel --config C:\cloudflared\config.yml ingress validate
 
-In Zero Trust UI:
-  Public hostname: crew.kingdom.forum
-  Path: /downloads*
-  Service: http://localhost:8787
-
-Keep download bat + tunnel running while people download.
+Notes
+-----
+  - Prefer a single cloudflared process (multiple connectors = confusing HA).
+  - cloudflared updated 2026-07-23 → 2026.7.3 (backup: cloudflared.exe.bak-2025.7.0).
+  - This PC may fail HTTPS to crew.kingdom.forum (local TLS/antivirus) while
+    phones outside still work. Test downloads from a phone, not only from PC.
+  - Config was optimized 2026-07-23: longer timeouts for APK/IPA + streams.

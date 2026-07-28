@@ -1,6 +1,6 @@
 /**
  * Best-effort device integrity checks for rooted Android / jailbroken iOS.
- * Not bulletproof (nothing is on a rooted device) — raises friction + warns admins.
+ * Not bulletproof (nothing is on a rooted device) — raises friction + signals API.
  */
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
@@ -10,17 +10,30 @@ const EXPECTED_ANDROID_PKG = 'com.commanderpro.radios';
 const EXPECTED_IOS_BUNDLE = 'com.commanderpro.radios';
 
 /**
+ * Compact integrity token sent as X-Device-Integrity (server stores on session).
+ * Format: ok|risk|reasons — never includes secrets.
+ */
+export function integrityHeaderValue(assessment) {
+  if (!assessment || typeof assessment !== 'object') return 'unknown';
+  const risk = assessment.compromised
+    ? 'high'
+    : !assessment.isDevice
+      ? 'medium'
+      : assessment.ok
+        ? 'ok'
+        : 'medium';
+  const reasons = Array.isArray(assessment.reasons)
+    ? assessment.reasons.slice(0, 6).join(',')
+    : '';
+  return `${risk}:${reasons || 'none'}`.slice(0, 120);
+}
+
+/**
  * @returns {Promise<{ ok: boolean, compromised: boolean, reasons: string[], packageOk: boolean }>}
  */
 export async function assessDeviceIntegrity() {
   const reasons = [];
   let compromised = false;
-
-  const pkg =
-    Constants.expoConfig?.android?.package ||
-    Constants.expoConfig?.ios?.bundleIdentifier ||
-    Constants.easConfig?.projectId ||
-    '';
 
   // Package / bundle id check (standalone only meaningful)
   let packageOk = true;
@@ -29,10 +42,7 @@ export async function assessDeviceIntegrity() {
     execEnv === 'standalone' || execEnv === 'bare' || execEnv === undefined;
 
   if (isStandalone && Platform.OS === 'android') {
-    const id =
-      Constants.expoConfig?.android?.package ||
-      // nativeApplicationVersion path not package
-      '';
+    const id = Constants.expoConfig?.android?.package || '';
     if (id && id !== EXPECTED_ANDROID_PKG) {
       packageOk = false;
       compromised = true;
@@ -48,34 +58,20 @@ export async function assessDeviceIntegrity() {
     }
   }
 
-  // Emulator / simulator is not a root by itself but riskier for stolen tokens
+  // Emulator / simulator is not root by itself but riskier for stolen tokens
   if (!Device.isDevice) {
     reasons.push('emulator_or_simulator');
   }
 
-  // Heuristic: rooted/jailbroken tooling leaves fingerprints some sandboxes still expose
-  // (works only when FS access is allowed; never throw)
-  if (Platform.OS === 'android') {
-    const androidHints = [
-      '/system/app/Superuser.apk',
-      '/system/xbin/su',
-      '/system/bin/su',
-      '/sbin/su',
-      '/data/local/xbin/su',
-      '/data/local/bin/su',
-    ];
-    // We cannot reliably open these from Expo sandbox; flag debuggable builds instead
-    if (typeof __DEV__ !== 'undefined' && __DEV__ && isStandalone) {
-      // shouldn't happen for production APK
-      reasons.push('dev_flag_in_standalone');
-    }
-    // Magisk / test-keys often set ro.build.tags — not readable without native module
-    void androidHints;
+  // Debuggable / dev flag inside a "production" standalone is suspicious
+  if (typeof __DEV__ !== 'undefined' && __DEV__ && isStandalone) {
+    reasons.push('dev_flag_in_standalone');
+    compromised = true;
   }
 
-  if (Platform.OS === 'ios') {
-    // Cydia / substrate paths are not readable from sandbox either
-    // Flag: if app is sideloaded enterprise without expected team — skip
+  // Expo Go is fine for testing but weaker isolation than APK/IPA
+  if (execEnv === 'storeClient' || Constants.appOwnership === 'expo') {
+    reasons.push('expo_go');
   }
 
   return {
@@ -87,15 +83,38 @@ export async function assessDeviceIntegrity() {
     platform: Platform.OS,
     brand: Device.brand || '',
     modelName: Device.modelName || '',
+    header: '', // filled below
   };
+}
+
+/** Run assess + attach compact header string. */
+export async function assessDeviceIntegrityFull() {
+  const a = await assessDeviceIntegrity();
+  a.header = integrityHeaderValue(a);
+  return a;
 }
 
 /** Reject cleartext API in production standalone builds. */
 export function assertSecureApiUrl(apiUrl) {
-  const u = String(apiUrl || '');
+  const u = String(apiUrl || '').trim();
   if (!u) return { ok: false, reason: 'missing_api_url' };
-  if (u.startsWith('https://')) return { ok: true };
-  // Allow local dev only
+  // Block credentials embedded in URL
+  if (/^https?:\/\/[^/]+:[^@/]+@/i.test(u)) {
+    return { ok: false, reason: 'url_embedded_credentials' };
+  }
+  if (u.startsWith('https://')) {
+    // Block obvious private IPs over https still ok for internal, but flag
+    try {
+      const host = u.replace(/^https:\/\//i, '').split('/')[0].split(':')[0];
+      if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/i.test(host)) {
+        return { ok: true, reason: 'local_https' };
+      }
+    } catch {
+      /* ignore */
+    }
+    return { ok: true };
+  }
+  // Allow local dev only (Expo LAN)
   if (
     /^http:\/\/(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/i.test(
       u

@@ -23,7 +23,7 @@ const BG_LAST_TS_KEY = 'bg_notify_last_ts';
 const API_URL = (
   process.env.EXPO_PUBLIC_API_URL || 'https://crew.kingdom.forum/api'
 ).replace(/\/+$/, '');
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 const CHANNEL = 'commander-pro';
 
 async function ensureAndroidChannel() {
@@ -45,6 +45,7 @@ async function ensureAndroidChannel() {
 }
 
 async function fetchAndNotify() {
+  // iOS Keychain + Android EncryptedSharedPreferences (default SecureStore)
   const token = await SecureStore.getItemAsync(SESSION_TOKEN_KEY);
   if (!token) {
     return BackgroundFetch.BackgroundFetchResult.NoData;
