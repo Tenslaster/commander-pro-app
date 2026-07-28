@@ -2,7 +2,7 @@
   "expo": {
     "name": "Commander PRO",
     "slug": "iphone-batch-manager",
-    "version": "1.4.0",
+    "version": "1.4.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -32,7 +32,7 @@
     },
     "android": {
       "package": "com.commanderpro.radios",
-      "versionCode": 140,
+      "versionCode": 141,
       "adaptiveIcon": {
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/android-icon-foreground.png",

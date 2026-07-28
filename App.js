@@ -139,7 +139,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -6576,6 +6576,8 @@ function AppInner() {
                   styles.tabListContent,
                   { paddingBottom: tabPadBottom + 16 },
                 ]}
+                nestedScrollEnabled
+                keyboardShouldPersistTaps="handled"
                 refreshControl={
                   <RefreshControl
                     refreshing={statsLoading}
@@ -6585,69 +6587,53 @@ function AppInner() {
                   />
                 }
               >
-                <Text style={styles.panelTitle}>{t('stats.title')}</Text>
-                <Text style={styles.metaLine}>
-                  {isOwner ? t('stats.subtitleOwner') : t('stats.subtitleRadio')}
-                  {statsPayload?.stats?.as_of
-                    ? ` · ${statsPayload.stats.as_of}`
-                    : ''}
-                </Text>
-
                 {isOwner ? (
+                  <View style={styles.statsSection}>
+                    <Text style={styles.statsSectionLabel}>{t('stats.pickStation')}</Text>
+                    <ScrollView
+                      horizontal
+                      nestedScrollEnabled
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.notifyFilterRow}
+                      style={{ maxHeight: 48 }}
+                    >
+                      {STATION_IDS.map((st) => (
+                        <Chip
+                          key={`stats-${st}`}
+                          label={st.replace('RADIO', 'R')}
+                          color={ROLE_COLORS[st] || '#22d3ee'}
+                          active={effectiveStatsStation === st}
+                          onPress={() => switchStatsStation(st)}
+                        />
+                      ))}
+                    </ScrollView>
+                  </View>
+                ) : null}
+
+                <View style={styles.statsSection}>
+                  <Text style={styles.statsSectionLabel}>{t('stats.periodLabel')}</Text>
                   <ScrollView
                     horizontal
+                    nestedScrollEnabled
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.notifyFilterRow}
-                    style={{ marginVertical: 8 }}
+                    style={{ maxHeight: 48 }}
                   >
-                    {STATION_IDS.map((st) => (
+                    {[
+                      { id: 'day', key: 'stats.period.day' },
+                      { id: 'week', key: 'stats.period.week' },
+                      { id: 'month', key: 'stats.period.month' },
+                    ].map((p) => (
                       <Chip
-                        key={`stats-${st}`}
-                        label={st.replace('RADIO', 'R')}
-                        color={ROLE_COLORS[st] || '#22d3ee'}
-                        active={effectiveStatsStation === st}
-                        onPress={() => switchStatsStation(st)}
+                        key={p.id}
+                        label={t(p.key)}
+                        color="#22d3ee"
+                        active={statsPeriod === p.id}
+                        onPress={() => setStatsPeriod(p.id)}
                       />
                     ))}
                   </ScrollView>
-                ) : (
-                  <View style={styles.manageStationLock}>
-                    <Ionicons
-                      name="radio"
-                      size={16}
-                      color={ROLE_COLORS[effectiveStatsStation] || '#22d3ee'}
-                    />
-                    <Text
-                      style={[
-                        styles.manageStationLockText,
-                        { color: ROLE_COLORS[effectiveStatsStation] || '#22d3ee' },
-                      ]}
-                    >
-                      {effectiveStatsStation}
-                    </Text>
-                  </View>
-                )}
-
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.notifyFilterRow}
-                  style={{ marginBottom: 12 }}
-                >
-                  {[
-                    { id: 'day', key: 'stats.period.day' },
-                    { id: 'week', key: 'stats.period.week' },
-                    { id: 'month', key: 'stats.period.month' },
-                  ].map((p) => (
-                    <Chip
-                      key={p.id}
-                      label={t(p.key)}
-                      color="#22d3ee"
-                      active={statsPeriod === p.id}
-                      onPress={() => setStatsPeriod(p.id)}
-                    />
-                  ))}
-                </ScrollView>
+                </View>
 
                 {statsLoading && !statsPayload ? (
                   <ActivityIndicator color="#22d3ee" style={{ marginTop: 24 }} />
@@ -6656,6 +6642,14 @@ function AppInner() {
                 {(() => {
                   const s = statsPayload?.stats?.[statsPeriod] || {};
                   const life = statsPayload?.stats?.lifetime || {};
+                  const fmt = (n) => {
+                    const v = Number(n) || 0;
+                    try {
+                      return v.toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-US');
+                    } catch {
+                      return String(v);
+                    }
+                  };
                   const pctLabel = (v) => {
                     const n = Number(v);
                     if (!Number.isFinite(n)) return '—';
@@ -6667,73 +6661,129 @@ function AppInner() {
                     if (!Number.isFinite(n) || n === 0) return '#94a3b8';
                     return n > 0 ? '#34d399' : '#f87171';
                   };
+                  const periodHint =
+                    statsPeriod === 'day'
+                      ? t('stats.compare.day')
+                      : statsPeriod === 'week'
+                        ? t('stats.compare.week')
+                        : t('stats.compare.month');
                   const cards = [
                     {
+                      icon: 'cash-outline',
                       label: t('stats.tipsGold'),
+                      hint: t('stats.hint.tipsGold'),
                       value: s.tips_gold ?? 0,
+                      prev: s.prev_tips_gold ?? 0,
                       pct: s.pct_tips_gold,
                       color: '#fbbf24',
                     },
                     {
+                      icon: 'heart-outline',
                       label: t('stats.tipsCount'),
+                      hint: t('stats.hint.tipsCount'),
                       value: s.tips_count ?? 0,
+                      prev: s.prev_tips_count ?? 0,
                       pct: s.pct_tips_count,
                       color: '#fb923c',
                     },
                     {
+                      icon: 'musical-notes-outline',
                       label: t('stats.songs'),
+                      hint: t('stats.hint.songs'),
                       value: s.songs ?? 0,
+                      prev: s.prev_songs ?? 0,
                       pct: s.pct_songs,
                       color: '#a78bfa',
                     },
                     {
+                      icon: 'swap-horizontal-outline',
                       label: t('stats.transfers'),
+                      hint: t('stats.hint.transfers'),
                       value: s.transfers_count ?? 0,
+                      prev: s.prev_transfers_count ?? 0,
                       pct: s.pct_transfers_count,
                       color: '#38bdf8',
                     },
                     {
+                      icon: 'wallet-outline',
                       label: t('stats.transfersGold'),
+                      hint: t('stats.hint.transfersGold'),
                       value: s.transfers_gold ?? 0,
+                      prev: s.prev_transfers_gold ?? 0,
                       pct: s.pct_transfers_gold,
                       color: '#22d3ee',
                     },
                   ];
                   return (
                     <>
+                      <Text style={styles.statsSectionLabel}>
+                        {t('stats.periodSummary')} · {t(`stats.period.${statsPeriod}`)}
+                      </Text>
                       <View style={styles.statsGrid}>
                         {cards.map((c) => (
                           <View
                             key={c.label}
                             style={[
                               styles.statsCard,
-                              { borderColor: `${c.color}55` },
+                              { borderColor: `${c.color}44` },
                             ]}
                           >
-                            <Text style={styles.statsCardLabel}>{c.label}</Text>
+                            <View style={styles.statsCardHead}>
+                              <View
+                                style={[
+                                  styles.statsCardIconWrap,
+                                  { backgroundColor: `${c.color}18` },
+                                ]}
+                              >
+                                <Ionicons name={c.icon} size={16} color={c.color} />
+                              </View>
+                              <Text style={styles.statsCardLabel} numberOfLines={2}>
+                                {c.label}
+                              </Text>
+                            </View>
                             <Text style={[styles.statsCardValue, { color: c.color }]}>
-                              {c.value}
+                              {fmt(c.value)}
                             </Text>
-                            <Text
-                              style={[
-                                styles.statsCardPct,
-                                { color: pctColor(c.pct) },
-                              ]}
-                            >
-                              {pctLabel(c.pct)} {t('stats.vsPrev')}
+                            <View style={styles.statsCardFoot}>
+                              <Text
+                                style={[
+                                  styles.statsCardPct,
+                                  { color: pctColor(c.pct) },
+                                ]}
+                              >
+                                {pctLabel(c.pct)}
+                              </Text>
+                              <Text style={styles.statsCardCompare} numberOfLines={1}>
+                                {periodHint}
+                              </Text>
+                            </View>
+                            <Text style={styles.statsCardPrev}>
+                              {t('stats.previous')}: {fmt(c.prev)}
                             </Text>
                           </View>
                         ))}
                       </View>
-                      <View style={styles.statsLifetimeBox}>
-                        <Text style={styles.statsCardLabel}>{t('stats.lifetime')}</Text>
-                        <Text style={styles.metaLine}>
-                          {t('stats.tipsGold')}: {life.tips_gold ?? 0} ·{' '}
-                          {t('stats.songs')}: {life.songs ?? 0}
-                        </Text>
-                        <Text style={[styles.metaLine, { marginTop: 6, fontSize: 11 }]}>
-                          {t('stats.note')}
-                        </Text>
+
+                      <Text style={[styles.statsSectionLabel, { marginTop: 18 }]}>
+                        {t('stats.lifetime')}
+                      </Text>
+                      <View style={styles.statsLifeRow}>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(251,191,36,0.35)' }]}>
+                          <Ionicons name="cash" size={18} color="#fbbf24" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.tips')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#fbbf24' }]}>
+                            {fmt(life.tips_gold ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>{t('stats.unit.gold')}</Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(167,139,250,0.35)' }]}>
+                          <Ionicons name="musical-notes" size={18} color="#a78bfa" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.songs')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#a78bfa' }]}>
+                            {fmt(life.songs ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>{t('stats.unit.songs')}</Text>
+                        </View>
                       </View>
                     </>
                   );
@@ -7682,11 +7732,11 @@ function AppInner() {
         ) : null}
 
         {/* Fallback if no tab content matched (should never happen) */}
-        {!['radios', 'users', 'chat', 'alerts', 'playlist', 'manage', 'security'].includes(
+        {!['radios', 'users', 'stats', 'chat', 'alerts', 'playlist', 'manage', 'security'].includes(
           safeMainTab
         ) ? (
           <View style={[styles.tabBody, styles.emptyWrap]}>
-            <Text style={styles.emptyText}>Onglet inconnu — retour Radios…</Text>
+            <Text style={styles.emptyText}>{t('tab.unknown')}</Text>
             <TouchableOpacity
               style={[styles.loginBtn, { marginTop: 16 }]}
               onPress={() => setMainTab('radios')}
@@ -9335,43 +9385,132 @@ const styles = StyleSheet.create({
   },
   ownerAlertsActions: { gap: 8, alignItems: 'center', paddingRight: 4 },
 
+  statsHero: {
+    backgroundColor: 'rgba(15,23,42,0.9)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(34,211,238,0.22)',
+    padding: 14,
+    marginBottom: 12,
+  },
+  statsHeroTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  statsHeroIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statsHeroTitle: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  statsHeroSub: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  statsSection: { marginBottom: 10 },
+  statsSectionLabel: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: 8,
+  },
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
-    marginTop: 4,
+    marginTop: 2,
   },
   statsCard: {
     width: '47%',
-    backgroundColor: 'rgba(15,23,42,0.85)',
-    borderRadius: 14,
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: 16,
     borderWidth: 1,
     padding: 12,
-    minHeight: 96,
+    minHeight: 128,
+  },
+  statsCardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  statsCardIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   statsCardLabel: {
-    color: '#94a3b8',
+    color: '#cbd5e1',
     fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 6,
+    fontWeight: '700',
+    flex: 1,
   },
   statsCardValue: {
-    fontSize: 26,
+    fontSize: 24,
     fontWeight: '800',
     letterSpacing: -0.5,
   },
+  statsCardFoot: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+  },
   statsCardPct: {
-    marginTop: 6,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  statsCardCompare: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
+    flex: 1,
+  },
+  statsCardPrev: {
+    color: '#475569',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  statsLifeRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  statsLifeCard: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+    alignItems: 'flex-start',
+    gap: 4,
+  },
+  statsLifeLabel: {
+    color: '#94a3b8',
     fontSize: 12,
     fontWeight: '700',
+    marginTop: 4,
   },
-  statsLifetimeBox: {
-    marginTop: 16,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: 'rgba(15,23,42,0.7)',
-    borderWidth: 1,
-    borderColor: 'rgba(34,211,238,0.25)',
+  statsLifeValue: {
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: -0.4,
+    marginTop: 2,
+  },
+  statsLifeUnit: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
   },
   bottomNav: {
     position: 'absolute',
