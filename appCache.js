@@ -90,22 +90,22 @@ export async function cacheGet(kind, id = '') {
 
 export async function cacheSet(kind, id, data, meta = null) {
   const k = fullKey(kind, id || '');
-  const entry = { ts: Date.now(), data, meta };
+  // Cap large payloads — users browse can be huge; keep a compact snapshot
+  let payload = data;
+  let metaOut = meta;
+  if (kind === 'users' && Array.isArray(data) && data.length > 400) {
+    payload = data.slice(0, 400);
+    metaOut = { ...(meta || {}), truncated: true, total: data.length };
+  }
+  if (kind === 'notify' && Array.isArray(data) && data.length > 120) {
+    payload = data.slice(0, 120);
+  }
+  const entry = { ts: Date.now(), data: payload, meta: metaOut };
   mem.set(k, entry);
   try {
-    // Cap large payloads — users browse can be huge; keep a compact snapshot
-    let payload = data;
-    if (kind === 'users' && Array.isArray(data) && data.length > 400) {
-      payload = data.slice(0, 400);
-      entry.meta = { ...(meta || {}), truncated: true, total: data.length };
-      mem.set(k, entry);
-    }
-    if (kind === 'notify' && Array.isArray(data) && data.length > 120) {
-      payload = data.slice(0, 120);
-    }
     await AsyncStorage.setItem(
       k,
-      JSON.stringify({ ts: entry.ts, data: payload, meta: entry.meta || meta })
+      JSON.stringify({ ts: entry.ts, data: payload, meta: metaOut })
     );
   } catch {
     /* disk full / quota — memory still works */

@@ -1872,6 +1872,7 @@ function AppInner() {
   const [statsPayload, setStatsPayload] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const statsInflightRef = useRef(false);
+  const statsFetchGenRef = useRef(0);
 
   // Management tab — APP login accounts (not Highrise room users)
   const [appUsersList, setAppUsersList] = useState([]);
@@ -2171,6 +2172,11 @@ function AppInner() {
     setPlaylistAdding(false);
     setPlaylistDownload(null);
     setPlaylistLoading(false);
+    setStatsPayload(null);
+    setStatsLoading(false);
+    setStatsPeriod('day');
+    setStatsStation('RADIO1');
+    statsFetchGenRef.current += 1;
     usersFetchGenRef.current += 1;
     usersSearchGenRef.current += 1;
     usersLoadedStationRef.current = '';
@@ -3876,8 +3882,6 @@ function AppInner() {
     async ({ silent = true } = {}) => {
       const token = authTokenRef.current;
       if (!token || !canStatsTab) return;
-      if (silent && statsInflightRef.current) return;
-      statsInflightRef.current = true;
       const role = userRoleRef.current || '';
       const station =
         role === 'OWNER'
@@ -3885,32 +3889,48 @@ function AppInner() {
           : STATION_IDS.includes(role)
             ? role
             : statsStation;
-      if (!station || !STATION_IDS.includes(station)) {
-        statsInflightRef.current = false;
-        return;
-      }
+      if (!station || !STATION_IDS.includes(station)) return;
+
+      // Silent polls skip if a request is already in flight for any station
+      if (silent && statsInflightRef.current) return;
+
+      const gen = ++statsFetchGenRef.current;
+      statsInflightRef.current = true;
+
       // Paint cached stats immediately (tab switch / offline)
       try {
         const cached = await cacheGet('stats', station);
-        if (cacheUsable(cached) && cached.data && mountedRef.current) {
-          setStatsPayload(cached.data);
-          if (!silent && !cached.stale) setStatsLoading(false);
+        if (
+          gen === statsFetchGenRef.current &&
+          cacheUsable(cached) &&
+          cached.data &&
+          mountedRef.current
+        ) {
+          // Only apply if payload matches this station (avoid cross-radio flash)
+          const cachedSt = cached.data?.station;
+          if (!cachedSt || cachedSt === station) {
+            setStatsPayload(cached.data);
+          }
         }
       } catch {
         /* ignore */
       }
-      if (!silent) setStatsLoading(true);
+      if (!silent && mountedRef.current && gen === statsFetchGenRef.current) {
+        setStatsLoading(true);
+      }
       try {
         const data = await apiFetch(
           `/station_stats?station=${encodeURIComponent(station)}`,
-          { token }
+          { token, timeoutMs: 15000 }
         );
-        if (mountedRef.current) {
-          const payload = data && typeof data === 'object' ? data : null;
-          setStatsPayload(payload);
-          if (payload) cacheSet('stats', station, payload).catch(() => {});
-        }
+        // Drop late responses after station switch / logout
+        if (!mountedRef.current || gen !== statsFetchGenRef.current) return;
+        const payload = data && typeof data === 'object' ? data : null;
+        if (payload && payload.station && payload.station !== station) return;
+        setStatsPayload(payload);
+        if (payload) cacheSet('stats', station, payload).catch(() => {});
       } catch (error) {
+        if (!mountedRef.current || gen !== statsFetchGenRef.current) return;
         if (error.code === 'UNAUTHORIZED') handleLogout();
         else if (!silent) {
           const peek = cachePeek('stats', station);
@@ -3919,8 +3939,10 @@ function AppInner() {
           }
         }
       } finally {
-        statsInflightRef.current = false;
-        if (mountedRef.current && !silent) setStatsLoading(false);
+        if (gen === statsFetchGenRef.current) {
+          statsInflightRef.current = false;
+          if (mountedRef.current && !silent) setStatsLoading(false);
+        }
       }
     },
     [canStatsTab, statsStation, handleLogout, showBanner]
