@@ -156,7 +156,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.4';
+const APP_VERSION = '1.4.5';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -285,7 +285,8 @@ const APP_PERM_KEYS = [
   'listen',
   'security',
 ];
-/** Groups for Gestion UI (give/remove rights by category) */
+/** Groups for Gestion UI (give/remove rights by category).
+ *  'security' only appears for real OWNER when creating/editing accounts. */
 const APP_PERM_GROUPS = [
   {
     id: 'radios',
@@ -301,9 +302,11 @@ const APP_PERM_GROUPS = [
   },
   {
     id: 'admin',
-    keys: ['manage_users', 'security'],
+    keys: ['manage_users'], // radio Gestion; security added only for OWNER
   },
 ];
+/** Default grantable (no security). OWNER UI adds security separately. */
+const APP_PERM_GRANTABLE = APP_PERM_KEYS.filter((k) => k !== 'security');
 const APP_LEVELS = ['viewer', 'operator', 'admin'];
 const APP_LEVEL_PRESETS = {
   viewer: ['status', 'alerts', 'chat', 'chat_send', 'stats', 'listen', 'users'],
@@ -321,7 +324,7 @@ const APP_LEVEL_PRESETS = {
     'bot_config',
     'playlist',
   ],
-  // Admin gets everything except security (OWNER-only by default)
+  // Admin = full radio ops including manage_users; never auto-include security
   admin: APP_PERM_KEYS.filter((k) => k !== 'security'),
 };
 const POLL_PLAYLIST_MS = 7000;
@@ -2318,6 +2321,7 @@ function AppInner() {
   }, []);
   const authTokenRef = useRef(null);
   const userRoleRef = useRef(null);
+  const appPermissionsRef = useRef([]);
   const appUsernameRef = useRef(null);
   const mountedRef = useRef(true);
   const prevStatusRef = useRef({});
@@ -2381,6 +2385,12 @@ function AppInner() {
   }, [userRole]);
 
   useEffect(() => {
+    appPermissionsRef.current = Array.isArray(appPermissions)
+      ? appPermissions
+      : [];
+  }, [appPermissions]);
+
+  useEffect(() => {
     appUsernameRef.current = appUsername || userRole;
   }, [appUsername, userRole]);
 
@@ -2424,7 +2434,9 @@ function AppInner() {
     },
     [isOwner, isMasterLogin, appPermissions]
   );
-  const canManageAppUsers = isOwner || isMasterLogin || hasPerm('manage_users');
+  // Gestion: OWNER or app users with manage_users (their radio only on API)
+  const canManageAppUsers =
+    isOwner || isMasterLogin || hasPerm('manage_users');
   const canControlRadios = isOwner || isMasterLogin || hasPerm('control');
   const canOpenLogs = isOwner || isMasterLogin || hasPerm('logs');
   const canBotConfig = isOwner || isMasterLogin || hasPerm('bot_config');
@@ -2466,7 +2478,27 @@ function AppInner() {
     isOwner || isMasterLogin || hasPerm('playlist') || hasPerm('control');
   const canListen =
     isOwner || isMasterLogin || hasPerm('listen') || hasPerm('status');
-  const canSecurityTab = isOwner || isMasterLogin || hasPerm('security');
+  // Security console: real OWNER only — never RADIO# masters (even with full rights).
+  // Optional: app logins that OWNER explicitly granted 'security' may view it.
+  const canSecurityTab =
+    isOwner ||
+    (!isMasterLogin &&
+      Array.isArray(appPermissions) &&
+      appPermissions.includes('security'));
+  // Only real OWNER may assign / remove the security right
+  const canGrantSecurity = isOwner;
+  const managePermGroups = useMemo(() => {
+    if (!canGrantSecurity) return APP_PERM_GROUPS;
+    return [
+      ...APP_PERM_GROUPS,
+      { id: 'ownerOnly', keys: ['security'] },
+    ];
+  }, [canGrantSecurity]);
+  const managePermKeysAllowed = useMemo(() => {
+    const base = [...APP_PERM_GRANTABLE];
+    if (canGrantSecurity && !base.includes('security')) base.push('security');
+    return base;
+  }, [canGrantSecurity]);
 
   const applyManagePreset = useCallback((level) => {
     const lv = APP_LEVELS.includes(level) ? level : 'viewer';
@@ -2474,17 +2506,23 @@ function AppInner() {
     setManagePerms([...(APP_LEVEL_PRESETS[lv] || APP_LEVEL_PRESETS.viewer)]);
   }, []);
 
-  const setAllManagePerms = useCallback((on) => {
-    setManageLevel('custom');
-    setManagePerms(on ? [...APP_PERM_KEYS] : []);
-  }, []);
+  const setAllManagePerms = useCallback(
+    (on) => {
+      setManageLevel('custom');
+      setManagePerms(on ? [...managePermKeysAllowed] : []);
+    },
+    [managePermKeysAllowed]
+  );
 
   const toggleManagePerm = useCallback((key) => {
+    if (!managePermKeysAllowed.includes(key)) return;
+    // Non-OWNER can never toggle security
+    if (key === 'security' && !canGrantSecurity) return;
     setManagePerms((prev) => {
       const set = new Set(prev);
       if (set.has(key)) set.delete(key);
       else set.add(key);
-      const next = APP_PERM_KEYS.filter((k) => set.has(k));
+      const next = managePermKeysAllowed.filter((k) => set.has(k));
       // Sync preset label if exact match
       let match = 'custom';
       for (const lv of APP_LEVELS) {
@@ -2500,7 +2538,7 @@ function AppInner() {
       setManageLevel(match);
       return next;
     });
-  }, []);
+  }, [managePermKeysAllowed, canGrantSecurity]);
 
   const pushActionLog = useCallback((text) => {
     const line = `${new Date().toLocaleTimeString()} — ${text}`;
@@ -3580,7 +3618,12 @@ function AppInner() {
   const fetchSecurity = useCallback(
     async ({ silent = true } = {}) => {
       const token = authTokenRef.current;
-      if (!token || userRoleRef.current !== 'OWNER') return;
+      // Real OWNER always; never RADIO# masters; app users only with granted security
+      const roleOk = userRoleRef.current === 'OWNER';
+      const isMaster = isMasterLogin; // closed over; masters never fetch security
+      const permOk =
+        !isMaster && (appPermissionsRef.current || []).includes('security');
+      if (!token || (!roleOk && !permOk)) return;
       if (!silent && mountedRef.current) setSecurityLoading(true);
       try {
         const data = await apiFetch('/security', { token, timeoutMs: 12000 });
@@ -3596,7 +3639,7 @@ function AppInner() {
         if (mountedRef.current) setSecurityLoading(false);
       }
     },
-    [handleLogout, showBanner, t]
+    [handleLogout, showBanner, t, isMasterLogin]
   );
 
   const kickSecuritySession = useCallback(
@@ -4984,10 +5027,15 @@ function AppInner() {
       Alert.alert(t('manage.create'), t('manage.passwordShort'));
       return;
     }
-    const perms =
+    const perms = (
       managePerms?.length > 0
         ? managePerms
-        : APP_LEVEL_PRESETS[manageLevel] || APP_LEVEL_PRESETS.viewer;
+        : APP_LEVEL_PRESETS[manageLevel] || APP_LEVEL_PRESETS.viewer
+    ).filter((p) => {
+      if (!managePermKeysAllowed.includes(p)) return false;
+      if (p === 'security' && !canGrantSecurity) return false;
+      return true;
+    });
     if (!perms.length) {
       Alert.alert(t('manage.create'), t('manage.needPerm'));
       return;
@@ -5048,6 +5096,8 @@ function AppInner() {
     manageLevel,
     managePerms,
     manageStation,
+    managePermKeysAllowed,
+    canGrantSecurity,
     isOwner,
     userRole,
     t,
@@ -5151,7 +5201,20 @@ function AppInner() {
       }
       return;
     }
-    const perms = (manageEditPerms || []).filter((p) => APP_PERM_KEYS.includes(p));
+    const perms = (manageEditPerms || []).filter((p) => {
+      if (!managePermKeysAllowed.includes(p)) return false;
+      if (p === 'security' && !canGrantSecurity) return false;
+      return true;
+    });
+    // Non-OWNER cannot strip security if OWNER already granted it
+    if (
+      !canGrantSecurity &&
+      Array.isArray(manageEditUser?.permissions) &&
+      manageEditUser.permissions.includes('security') &&
+      !perms.includes('security')
+    ) {
+      perms.push('security');
+    }
     if (!perms.length) {
       Alert.alert(t('manage.editPerms'), t('manage.needPerm'));
       return;
@@ -5180,6 +5243,8 @@ function AppInner() {
     manageEditPwdOnly,
     manageEditPassword,
     manageEditPerms,
+    managePermKeysAllowed,
+    canGrantSecurity,
     updateAppLoginUser,
     fetchAppUsers,
     t,
@@ -6988,7 +7053,6 @@ function AppInner() {
     canPlaylist,
     canManageAppUsers,
     canSecurityTab,
-    isOwner,
   ]);
 
   // Stats tab: smart adaptive refresh while visible
@@ -8695,7 +8759,8 @@ function AppInner() {
 
                   <View style={styles.managePermToolbar}>
                     <Text style={styles.manageFieldLabel}>
-                      {t('manage.permissions')} · {managePerms.length}/{APP_PERM_KEYS.length}
+                      {t('manage.permissions')} · {managePerms.length}/
+                      {managePermKeysAllowed.length}
                     </Text>
                     <View style={{ flexDirection: 'row', gap: 8 }}>
                       <Pressable
@@ -8712,10 +8777,12 @@ function AppInner() {
                       </Pressable>
                     </View>
                   </View>
-                  {APP_PERM_GROUPS.map((grp) => (
+                  {managePermGroups.map((grp) => (
                     <View key={grp.id} style={styles.managePermGroup}>
                       <Text style={styles.managePermGroupTitle}>
-                        {t(`manage.group.${grp.id}`)}
+                        {grp.id === 'ownerOnly'
+                          ? t('manage.group.ownerOnly')
+                          : t(`manage.group.${grp.id}`)}
                       </Text>
                       <View style={styles.managePermGrid}>
                         {grp.keys.map((key) => {
@@ -8952,7 +9019,7 @@ function AppInner() {
                             </Pressable>
                           ))}
                           <Pressable
-                            onPress={() => setManageEditPerms([...APP_PERM_KEYS])}
+                            onPress={() => setManageEditPerms([...managePermKeysAllowed])}
                             style={styles.manageRankChip}
                           >
                             <Text style={styles.manageRankChipText}>
@@ -8970,12 +9037,14 @@ function AppInner() {
                         </View>
                         <Text style={styles.manageFieldLabel}>
                           {t('manage.permissions')} · {manageEditPerms.length}/
-                          {APP_PERM_KEYS.length}
+                          {managePermKeysAllowed.length}
                         </Text>
-                        {APP_PERM_GROUPS.map((grp) => (
+                        {managePermGroups.map((grp) => (
                           <View key={`edg-${grp.id}`} style={styles.managePermGroup}>
                             <Text style={styles.managePermGroupTitle}>
-                              {t(`manage.group.${grp.id}`)}
+                              {grp.id === 'ownerOnly'
+                                ? t('manage.group.ownerOnly')
+                                : t(`manage.group.${grp.id}`)}
                             </Text>
                             <View style={styles.managePermGrid}>
                               {grp.keys.map((key) => {
@@ -8984,11 +9053,14 @@ function AppInner() {
                                   <Pressable
                                     key={`edp-${key}`}
                                     onPress={() => {
+                                      if (key === 'security' && !canGrantSecurity) return;
                                       setManageEditPerms((prev) => {
                                         const s = new Set(prev);
                                         if (s.has(key)) s.delete(key);
                                         else s.add(key);
-                                        return APP_PERM_KEYS.filter((k) => s.has(k));
+                                        return managePermKeysAllowed.filter((k) =>
+                                          s.has(k)
+                                        );
                                       });
                                     }}
                                     style={[

@@ -166,6 +166,7 @@ const STRINGS = {
     'manage.group.social': 'Chat & alertes',
     'manage.group.data': 'Users & données',
     'manage.group.admin': 'Admin app',
+    'manage.group.ownerOnly': 'OWNER uniquement',
     'manage.levelHelp':
       'Choisis un préréglage puis active / retire chaque droit une par une.',
     'manage.needPerm': 'Coche au moins une permission.',
@@ -572,6 +573,7 @@ const STRINGS = {
     'manage.group.social': 'Chat & alerts',
     'manage.group.data': 'Users & data',
     'manage.group.admin': 'App admin',
+    'manage.group.ownerOnly': 'OWNER only',
     'manage.levelHelp':
       'Pick a preset, then give or remove each right one by one.',
     'manage.needPerm': 'Enable at least one permission.',
