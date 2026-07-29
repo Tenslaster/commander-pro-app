@@ -156,7 +156,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -1621,7 +1621,8 @@ const RadioPlayerBar = React.memo(
                 styles.radioNowTitle,
                 !title && styles.radioNowTitleMuted,
               ]}
-              numberOfLines={2}
+              numberOfLines={3}
+              ellipsizeMode="tail"
             >
               {title ||
                 (playing
@@ -1666,6 +1667,9 @@ const ProcessCard = React.memo(
     onLongPress,
     onEditRoom,
     onEditApiKey,
+    onListenStation,
+    listenStationId,
+    listenPlaying,
     t,
     allowControl = true,
     allowLogs = true,
@@ -1679,6 +1683,25 @@ const ProcessCard = React.memo(
     const canKill = allowControl && isRunning;
     const canRestart = allowControl && (isRunning || isError);
     const isBot = isBotProcess(item);
+    // Main radio process for this station → show Listen next to start/stop
+    const stationFromId = (() => {
+      const id = String(item?.id || item?.name || '');
+      const m = id.match(/RADIO\s*(\d{1,2})/i) || id.match(/R(\d{1,2})/i);
+      if (m) return `RADIO${parseInt(m[1], 10)}`;
+      for (const st of STATION_IDS) {
+        if (id.toUpperCase().includes(st)) return st;
+      }
+      return null;
+    })();
+    const isMainRadio =
+      !isBot &&
+      stationFromId &&
+      (/MAIN/i.test(String(item?.id || '')) ||
+        /main/i.test(String(item?.name || '')) ||
+        /stream/i.test(String(item?.id || '')));
+    const showListen = Boolean(isMainRadio && stationFromId && onListenStation);
+    const listenActive =
+      showListen && listenPlaying && listenStationId === stationFromId;
     const roomId = item.room_id || '';
     const keyMask = item.api_key_masked || (item.api_key_tail ? `…${item.api_key_tail}` : '');
 
@@ -1750,8 +1773,31 @@ const ProcessCard = React.memo(
             )}
           </TouchableOpacity>
 
-          {allowControl || (isBot && allowBotConfig) ? (
+          {allowControl || showListen || (isBot && allowBotConfig) ? (
             <View style={styles.actionRow}>
+              {showListen ? (
+                <TouchableOpacity
+                  style={[
+                    styles.iconButton,
+                    {
+                      backgroundColor: listenActive
+                        ? '#ef4444'
+                        : `${ROLE_COLORS[stationFromId] || '#22d3ee'}55`,
+                    },
+                  ]}
+                  onPress={() => onListenStation?.(stationFromId)}
+                  accessibilityLabel={
+                    listenActive ? tr('radio.stop') : tr('radio.listen')
+                  }
+                  hitSlop={HIT_SLOP_SM}
+                >
+                  <Ionicons
+                    name={listenActive ? 'headset' : 'headset-outline'}
+                    size={18}
+                    color={listenActive ? '#fff' : ROLE_COLORS[stationFromId] || '#67e8f9'}
+                  />
+                </TouchableOpacity>
+              ) : null}
               {allowControl ? (
                 <>
                   <TouchableOpacity
@@ -2218,6 +2264,8 @@ function AppInner() {
   const usersLoadedStationRef = useRef('');
 
   const flatListRef = useRef(null);
+  /** Terminal autoscroll only when user is near bottom (prevents scroll glitch). */
+  const terminalNearBottomRef = useRef(true);
   const notifyListRef = useRef(null);
   const chatListRef = useRef(null);
   const chatStickToBottomRef = useRef(true);
@@ -2450,6 +2498,20 @@ function AppInner() {
   }, []);
 
   const handleLogout = useCallback(async () => {
+    // Revoke session server-side before wiping local token (stolen-token window)
+    try {
+      const tok = authTokenRef.current;
+      if (tok) {
+        await apiFetch('/logout', {
+          method: 'POST',
+          token: tok,
+          timeoutMs: 4000,
+          body: {},
+        }).catch(() => null);
+      }
+    } catch {
+      /* best-effort — still clear local session */
+    }
     // Kill deferred push registration immediately
     clearPushTimers();
     authTokenRef.current = null;
@@ -6691,6 +6753,30 @@ function AppInner() {
     );
   }, []);
 
+  const onListenFromCard = useCallback(
+    async (stationId) => {
+      if (!stationId || !STATION_IDS.includes(stationId)) return;
+      if (
+        listenAllowedStations.length &&
+        !listenAllowedStations.includes(stationId)
+      ) {
+        return;
+      }
+      // Same station already playing → stop; else switch + play
+      if (
+        listenPlayingRef.current &&
+        listenStationRef.current === stationId
+      ) {
+        await stopRadioStream();
+        return;
+      }
+      listenStationRef.current = stationId;
+      setListenStation(stationId);
+      await playRadioStream(stationId, { silent: false });
+    },
+    [listenAllowedStations, playRadioStream, stopRadioStream]
+  );
+
   const renderProcessItem = useCallback(
     ({ item }) => (
       <ProcessCard
@@ -6700,6 +6786,9 @@ function AppInner() {
         onLongPress={onProcessLongPress}
         onEditRoom={(p) => openBotConfigEditor(p, 'room')}
         onEditApiKey={(p) => openBotConfigEditor(p, 'key')}
+        onListenStation={onListenFromCard}
+        listenStationId={listenStation}
+        listenPlaying={listenPlaying}
         t={t}
         allowControl={canControlRadios}
         allowLogs={canOpenLogs}
@@ -6711,6 +6800,9 @@ function AppInner() {
       sendCommand,
       onProcessLongPress,
       openBotConfigEditor,
+      onListenFromCard,
+      listenStation,
+      listenPlaying,
       t,
       canControlRadios,
       canOpenLogs,
@@ -8756,14 +8848,32 @@ function AppInner() {
                       </View>
                     </View>
                     <Text style={styles.secIp} selectable>
-                      IPv4  {s.ip || '—'}
+                      {(() => {
+                        const v4 =
+                          s.ip_v4 ||
+                          s.ip ||
+                          (s.ip_raw && !String(s.ip_raw).includes(':') ? s.ip_raw : '') ||
+                          '';
+                        const raw = s.ip_raw || s.ip || '';
+                        if (v4 && String(v4).includes('.')) {
+                          return `IPv4  ${v4}`;
+                        }
+                        if (raw) {
+                          return `IP  ${raw}`;
+                        }
+                        return 'IP  —';
+                      })()}
                     </Text>
-                    {s.geo?.label ? (
-                      <Text style={styles.secGeo} numberOfLines={2}>
-                        📍 {s.geo.label}
-                        {s.geo.isp ? ` · ${s.geo.isp}` : ''}
-                      </Text>
-                    ) : null}
+                    <Text style={styles.secGeo} numberOfLines={3}>
+                      📍{' '}
+                      {s.geo?.label && s.geo.label !== '—'
+                        ? `${s.geo.label}${s.geo.isp ? ` · ${s.geo.isp}` : ''}`
+                        : s.geo?.ok === false && s.geo?.label
+                          ? s.geo.label
+                          : s.ip || s.ip_v4 || s.ip_raw
+                            ? 'geo pending…'
+                            : 'no IP'}
+                    </Text>
                     {s.ip_history?.length > 1 ? (
                       <Text style={styles.secCardMeta} numberOfLines={2}>
                         IPs: {(s.ip_history || []).join(' → ')}
@@ -8798,14 +8908,18 @@ function AppInner() {
               <Text style={styles.secEmpty}>{t('security.empty')}</Text>
             ) : (
               (securityData?.failed_logins || []).map((f) => (
-                <View key={`fail-${f.ip}`} style={styles.secCard}>
+                <View key={`fail-${f.ip}-${f.fail_count}`} style={styles.secCard}>
                   <Text style={styles.secIp} selectable>
-                    {f.ip}
+                    {f.ip_v4 || f.ip || '—'}
                   </Text>
-                  {f.geo?.label ? (
+                  {f.geo?.label && f.geo.label !== '—' ? (
                     <Text style={styles.secGeo} numberOfLines={2}>
                       📍 {f.geo.label}
                       {f.geo.isp ? ` · ${f.geo.isp}` : ''}
+                    </Text>
+                  ) : f.ip ? (
+                    <Text style={styles.secGeo} numberOfLines={1}>
+                      📍 geo pending…
                     </Text>
                   ) : null}
                   <Text style={styles.secCardMeta}>
@@ -8828,11 +8942,16 @@ function AppInner() {
                     {d.role || '?'} · {d.client || '?'} · …{d.token_suffix || ''}
                   </Text>
                   <Text style={styles.secIp} selectable>
-                    {d.last_ip || '—'}
+                    {d.ip_v4 || d.last_ip || '—'}
                   </Text>
-                  {d.geo?.label ? (
+                  {d.geo?.label && d.geo.label !== '—' ? (
                     <Text style={styles.secGeo} numberOfLines={2}>
                       📍 {d.geo.label}
+                      {d.geo.isp ? ` · ${d.geo.isp}` : ''}
+                    </Text>
+                  ) : d.last_ip ? (
+                    <Text style={styles.secGeo} numberOfLines={1}>
+                      📍 geo pending…
                     </Text>
                   ) : null}
                   <Text style={styles.secCardMeta}>
@@ -9794,7 +9913,29 @@ function AppInner() {
                   renderItem={renderLogItem}
                   {...listPerfProps}
                   initialNumToRender={20}
+                  maintainVisibleContentPosition={
+                    IS_IOS
+                      ? { minIndexForVisible: 0, autoscrollToTopThreshold: 24 }
+                      : undefined
+                  }
+                  onScroll={(e) => {
+                    try {
+                      const { contentOffset, contentSize, layoutMeasurement } =
+                        e.nativeEvent;
+                      const dist =
+                        contentSize.height -
+                        layoutMeasurement.height -
+                        contentOffset.y;
+                      terminalNearBottomRef.current = dist < 100;
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  scrollEventThrottle={48}
                   onContentSizeChange={() => {
+                    // Only stick to bottom if user is already near the end
+                    // (fixes jump/glitch when scrolling up to read older logs)
+                    if (!terminalNearBottomRef.current) return;
                     try {
                       flatListRef.current?.scrollToEnd({ animated: false });
                     } catch {
@@ -11117,10 +11258,11 @@ const styles = StyleSheet.create({
   },
   radioNowTitle: {
     color: '#f8fafc',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
     marginTop: 2,
-    lineHeight: 19,
+    lineHeight: 18,
+    flexShrink: 1,
   },
   radioNowTitleMuted: {
     color: '#94a3b8',

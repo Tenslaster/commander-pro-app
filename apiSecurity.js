@@ -8,6 +8,14 @@
  *  - Never put tokens into AsyncStorage cache
  */
 
+// Polyfill crypto.getRandomValues on RN / Expo Go (must run before nonce gen)
+try {
+  // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+  require('react-native-get-random-values');
+} catch {
+  /* optional — may not be installed yet */
+}
+
 import { Platform } from 'react-native';
 import * as Device from 'expo-device';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
@@ -17,26 +25,149 @@ const IS_EXPO_GO =
   Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
   Constants.appOwnership === 'expo';
 
-/** Cryptographically strong enough for request nonces (not for passwords). */
-export function randomNonceHex(bytes = 12) {
-  const n = Math.max(8, Math.min(32, bytes | 0));
-  // Prefer WebCrypto when available (Hermes / modern RN)
-  try {
-    if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
-      const arr = new Uint8Array(n);
-      globalThis.crypto.getRandomValues(arr);
-      return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
-    }
-  } catch {
-    /* fall through */
-  }
+/** @type {Uint8Array | null} */
+let _noncePool = null;
+let _noncePoolOff = 0;
+let _nonceWarmPromise = null;
+
+function _bytesToHex(arr) {
   let out = '';
-  for (let i = 0; i < n; i += 1) {
-    out += Math.floor(Math.random() * 256)
-      .toString(16)
-      .padStart(2, '0');
+  for (let i = 0; i < arr.length; i += 1) {
+    out += arr[i].toString(16).padStart(2, '0');
   }
   return out;
+}
+
+/**
+ * Fill a pool of secure random bytes (async expo-crypto / WebCrypto).
+ * Call at app boot so sync nonce gen never blocks or fails.
+ */
+export async function warmSecureRandom(poolBytes = 512) {
+  if (_nonceWarmPromise) return _nonceWarmPromise;
+  _nonceWarmPromise = (async () => {
+    try {
+      // expo-crypto (works on Expo Go + standalone without WebCrypto)
+      try {
+        // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+        const ExpoCrypto = require('expo-crypto');
+        if (ExpoCrypto?.getRandomBytesAsync) {
+          const buf = await ExpoCrypto.getRandomBytesAsync(poolBytes);
+          _noncePool = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+          _noncePoolOff = 0;
+          return;
+        }
+        if (typeof ExpoCrypto?.getRandomBytes === 'function') {
+          const buf = ExpoCrypto.getRandomBytes(poolBytes);
+          _noncePool = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+          _noncePoolOff = 0;
+          return;
+        }
+      } catch {
+        /* try WebCrypto below */
+      }
+      const c =
+        (typeof globalThis !== 'undefined' && globalThis.crypto) ||
+        (typeof global !== 'undefined' && global.crypto) ||
+        null;
+      if (c?.getRandomValues) {
+        const buf = new Uint8Array(poolBytes);
+        c.getRandomValues(buf);
+        _noncePool = buf;
+        _noncePoolOff = 0;
+      }
+    } catch {
+      /* leave pool empty — sync path has more fallbacks */
+    } finally {
+      _nonceWarmPromise = null;
+    }
+  })();
+  return _nonceWarmPromise;
+}
+
+function _takeFromPool(n) {
+  if (!_noncePool || _noncePoolOff + n > _noncePool.length) return null;
+  const slice = _noncePool.subarray(_noncePoolOff, _noncePoolOff + n);
+  _noncePoolOff += n;
+  // Refill in background when half used
+  if (_noncePoolOff > _noncePool.length / 2) {
+    warmSecureRandom().catch(() => {});
+  }
+  return slice;
+}
+
+/**
+ * Cryptographically strong nonce for anti-replay headers.
+ * Order: WebCrypto → expo-crypto sync → pre-warmed pool → high-entropy composite
+ * (never plain Math.random alone).
+ */
+export function randomNonceHex(bytes = 12) {
+  const n = Math.max(8, Math.min(32, bytes | 0));
+
+  // 1) WebCrypto / polyfilled getRandomValues (after get-random-values import)
+  try {
+    const c =
+      (typeof globalThis !== 'undefined' && globalThis.crypto) ||
+      (typeof global !== 'undefined' && global.crypto) ||
+      null;
+    if (c && typeof c.getRandomValues === 'function') {
+      const arr = new Uint8Array(n);
+      c.getRandomValues(arr);
+      return _bytesToHex(arr);
+    }
+  } catch {
+    /* continue */
+  }
+
+  // 2) expo-crypto sync API (when available)
+  try {
+    // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+    const ExpoCrypto = require('expo-crypto');
+    if (typeof ExpoCrypto?.getRandomBytes === 'function') {
+      const buf = ExpoCrypto.getRandomBytes(n);
+      const arr = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+      return _bytesToHex(arr);
+    }
+  } catch {
+    /* continue */
+  }
+
+  // 3) Pre-warmed pool from warmSecureRandom() at app boot
+  try {
+    const slice = _takeFromPool(n);
+    if (slice && slice.length === n) {
+      return _bytesToHex(slice);
+    }
+  } catch {
+    /* continue */
+  }
+
+  // 4) Kick async warm for next time
+  warmSecureRandom().catch(() => {});
+
+  // 5) Last-resort uniqueness (anti-replay still works with server-side nonce store
+  //    + timestamp). Mix timer entropy + counter — NOT Math.random() alone.
+  //    Still better than failing every POST in Expo Go without WebCrypto.
+  const arr = new Uint8Array(n);
+  let c = (randomNonceHex._c = ((randomNonceHex._c || 0) + 1) >>> 0);
+  let t =
+    (typeof performance !== 'undefined' && performance.now
+      ? performance.now()
+      : 0) * 1000;
+  const wall = Date.now();
+  for (let i = 0; i < n; i += 1) {
+    c = (Math.imul(c, 1664525) + 1013904223) >>> 0; // LCG mix on counter
+    t = (t * 1.0000001 + i + (wall & 0xff)) % 1e12;
+    // Mix bits without relying solely on Math.random quality
+    const mixed =
+      (c ^ (wall >>> ((i * 3) % 24)) ^ ((t | 0) << (i % 8))) & 0xff;
+    // Light extra scramble (not CSPRNG; uniqueness for nonces)
+    arr[i] = mixed ^ ((i * 37 + (c & 0xff)) & 0xff);
+  }
+  // Optional: sprinkle real Math.random only as one of several entropy inputs
+  for (let i = 0; i < n; i += 1) {
+    arr[i] ^= (Math.random() * 256) & 0xff;
+  }
+  return _bytesToHex(arr);
 }
 
 /** Unix seconds for X-Request-Ts (replay window on server). */
@@ -60,7 +191,8 @@ export function buildSecureHeaders({
     Accept: 'application/json',
     'User-Agent': `CommanderPRO/${appVersion} (Expo; ReactNative; ${Platform.OS})`,
     'X-App-Version': String(appVersion).slice(0, 32),
-    'X-App-Platform': Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown',
+    'X-App-Platform':
+      Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown',
     'X-Device-Integrity': String(integrity || 'unknown').slice(0, 120),
     'X-Device-Name': String(
       deviceName || Device.modelName || Device.deviceName || Device.modelId || ''
@@ -69,9 +201,16 @@ export function buildSecureHeaders({
     'X-Client': IS_EXPO_GO ? 'expo-go' : 'standalone',
   };
 
-  // Mutating requests get a nonce (server can log / future strict replay DB)
+  // Mutating requests get a nonce (never throw — always produce a header)
   if (methodU !== 'GET' && methodU !== 'HEAD' && methodU !== 'OPTIONS') {
-    headers['X-Request-Nonce'] = randomNonceHex(12);
+    try {
+      headers['X-Request-Nonce'] = randomNonceHex(12);
+    } catch {
+      // Absolute last ditch so login/logout never hard-crash the app
+      headers['X-Request-Nonce'] = `${Date.now().toString(16)}${(
+        randomNonceHex._c = (randomNonceHex._c || 0) + 1
+      ).toString(16)}`.padEnd(24, '0').slice(0, 24);
+    }
   }
 
   if (token) {
