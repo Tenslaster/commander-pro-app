@@ -156,7 +156,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.3';
+const APP_VERSION = '1.4.4';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -270,28 +270,59 @@ const APP_PERM_KEYS = [
   'control',
   'bot_config',
   'logs',
+  'commands',
   'chat',
   'chat_send',
   'alerts',
+  'stats',
   'users',
   'users_edit',
+  'ranks',
+  'bans',
+  'bank',
   'manage_users',
   'playlist',
+  'listen',
+  'security',
+];
+/** Groups for Gestion UI (give/remove rights by category) */
+const APP_PERM_GROUPS = [
+  {
+    id: 'radios',
+    keys: ['status', 'control', 'bot_config', 'logs', 'commands', 'listen'],
+  },
+  {
+    id: 'social',
+    keys: ['chat', 'chat_send', 'alerts'],
+  },
+  {
+    id: 'data',
+    keys: ['stats', 'users', 'users_edit', 'ranks', 'bans', 'bank', 'playlist'],
+  },
+  {
+    id: 'admin',
+    keys: ['manage_users', 'security'],
+  },
 ];
 const APP_LEVELS = ['viewer', 'operator', 'admin'];
 const APP_LEVEL_PRESETS = {
-  viewer: ['status', 'alerts', 'chat', 'chat_send'],
+  viewer: ['status', 'alerts', 'chat', 'chat_send', 'stats', 'listen', 'users'],
   operator: [
     'status',
     'alerts',
     'chat',
     'chat_send',
+    'stats',
+    'listen',
+    'users',
     'control',
     'logs',
+    'commands',
     'bot_config',
     'playlist',
   ],
-  admin: [...APP_PERM_KEYS],
+  // Admin gets everything except security (OWNER-only by default)
+  admin: APP_PERM_KEYS.filter((k) => k !== 'security'),
 };
 const POLL_PLAYLIST_MS = 7000;
 const ALERTS_KEY = 'status_alerts_enabled';
@@ -2397,22 +2428,55 @@ function AppInner() {
   const canControlRadios = isOwner || isMasterLogin || hasPerm('control');
   const canOpenLogs = isOwner || isMasterLogin || hasPerm('logs');
   const canBotConfig = isOwner || isMasterLogin || hasPerm('bot_config');
+  const canCommands =
+    isOwner || isMasterLogin || hasPerm('commands') || hasPerm('logs');
   const canChat = isOwner || isMasterLogin || hasPerm('chat');
   const canChatSend = isOwner || isMasterLogin || hasPerm('chat_send');
   const canAlerts = isOwner || isMasterLogin || hasPerm('alerts');
-  const canUsersTab = isOwner || isMasterLogin || hasPerm('users');
-  const canUsersEdit = isOwner || isMasterLogin || hasPerm('users_edit');
-  // Stats: status viewers + users tab + owner (radio sees own station only)
+  const canUsersTab =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('users') ||
+    hasPerm('users_edit') ||
+    hasPerm('ranks') ||
+    hasPerm('bans') ||
+    hasPerm('bank');
+  const canUsersEdit =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('users_edit') ||
+    hasPerm('ranks') ||
+    hasPerm('bans') ||
+    hasPerm('bank');
+  const canEditRanks =
+    isOwner || isMasterLogin || hasPerm('users_edit') || hasPerm('ranks');
+  const canEditBans =
+    isOwner || isMasterLogin || hasPerm('users_edit') || hasPerm('bans');
+  const canEditBank =
+    isOwner || isMasterLogin || hasPerm('users_edit') || hasPerm('bank');
+  // Stats: explicit stats perm, or legacy status/users + owner
   const canStatsTab =
-    isOwner || isMasterLogin || hasPerm('status') || hasPerm('users');
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('stats') ||
+    hasPerm('status') ||
+    hasPerm('users');
   // playlist right, or legacy control (operators already had control before playlist perm)
   const canPlaylist =
     isOwner || isMasterLogin || hasPerm('playlist') || hasPerm('control');
+  const canListen =
+    isOwner || isMasterLogin || hasPerm('listen') || hasPerm('status');
+  const canSecurityTab = isOwner || isMasterLogin || hasPerm('security');
 
   const applyManagePreset = useCallback((level) => {
     const lv = APP_LEVELS.includes(level) ? level : 'viewer';
     setManageLevel(lv);
     setManagePerms([...(APP_LEVEL_PRESETS[lv] || APP_LEVEL_PRESETS.viewer)]);
+  }, []);
+
+  const setAllManagePerms = useCallback((on) => {
+    setManageLevel('custom');
+    setManagePerms(on ? [...APP_PERM_KEYS] : []);
   }, []);
 
   const toggleManagePerm = useCallback((key) => {
@@ -6914,7 +6978,7 @@ function AppInner() {
     else if (mainTab === 'alerts' && !canAlerts) setMainTab('radios');
     else if (mainTab === 'playlist' && !canPlaylist) setMainTab('radios');
     else if (mainTab === 'manage' && !canManageAppUsers) setMainTab('radios');
-    else if (mainTab === 'security' && !isOwner) setMainTab('radios');
+    else if (mainTab === 'security' && !canSecurityTab) setMainTab('radios');
   }, [
     mainTab,
     canUsersTab,
@@ -6923,6 +6987,7 @@ function AppInner() {
     canAlerts,
     canPlaylist,
     canManageAppUsers,
+    canSecurityTab,
     isOwner,
   ]);
 
@@ -6991,14 +7056,14 @@ function AppInner() {
 
   // Security tab: poll only while visible (smooth + low load)
   useEffect(() => {
-    if (!isUnlocked || !isOwner || mainTab !== 'security') return undefined;
+    if (!isUnlocked || !canSecurityTab || mainTab !== 'security') return undefined;
     fetchSecurity({ silent: true });
     const id = setInterval(() => {
       if (appStateRef.current !== 'active') return;
       fetchSecurity({ silent: true });
     }, 8000);
     return () => clearInterval(id);
-  }, [isUnlocked, isOwner, mainTab, fetchSecurity]);
+  }, [isUnlocked, canSecurityTab, mainTab, fetchSecurity]);
 
   const renderSectionHeader = useCallback(({ section }) => {
     if (!section?.title) return null;
@@ -7837,10 +7902,23 @@ function AppInner() {
                 {(() => {
                   const s = statsPayload?.stats?.[statsPeriod] || {};
                   const life = statsPayload?.stats?.lifetime || {};
+                  const boards = statsPayload?.stats?.leaderboards || {};
+                  const ranks = statsPayload?.stats?.ranks || {};
                   const fmt = (n) => {
                     const v = Number(n) || 0;
                     try {
                       return v.toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-US');
+                    } catch {
+                      return String(v);
+                    }
+                  };
+                  const fmtDec = (n) => {
+                    const v = Number(n);
+                    if (!Number.isFinite(v)) return '0';
+                    try {
+                      return v.toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-US', {
+                        maximumFractionDigits: 1,
+                      });
                     } catch {
                       return String(v);
                     }
@@ -7866,7 +7944,6 @@ function AppInner() {
                     {
                       icon: 'cash-outline',
                       label: t('stats.tipsGold'),
-                      hint: t('stats.hint.tipsGold'),
                       value: s.tips_gold ?? 0,
                       prev: s.prev_tips_gold ?? 0,
                       pct: s.pct_tips_gold,
@@ -7875,25 +7952,39 @@ function AppInner() {
                     {
                       icon: 'heart-outline',
                       label: t('stats.tipsCount'),
-                      hint: t('stats.hint.tipsCount'),
                       value: s.tips_count ?? 0,
                       prev: s.prev_tips_count ?? 0,
                       pct: s.pct_tips_count,
                       color: '#fb923c',
                     },
                     {
+                      icon: 'trending-up-outline',
+                      label: t('stats.avgTip'),
+                      value: s.avg_tip ?? 0,
+                      prev: s.prev_avg_tip ?? 0,
+                      pct: s.pct_avg_tip,
+                      color: '#f59e0b',
+                      dec: true,
+                    },
+                    {
                       icon: 'musical-notes-outline',
                       label: t('stats.songs'),
-                      hint: t('stats.hint.songs'),
                       value: s.songs ?? 0,
                       prev: s.prev_songs ?? 0,
                       pct: s.pct_songs,
                       color: '#a78bfa',
                     },
                     {
+                      icon: 'people-outline',
+                      label: t('stats.visitors'),
+                      value: s.visitors ?? 0,
+                      prev: s.prev_visitors ?? 0,
+                      pct: s.pct_visitors,
+                      color: '#34d399',
+                    },
+                    {
                       icon: 'swap-horizontal-outline',
                       label: t('stats.transfers'),
-                      hint: t('stats.hint.transfers'),
                       value: s.transfers_count ?? 0,
                       prev: s.prev_transfers_count ?? 0,
                       pct: s.pct_transfers_count,
@@ -7902,22 +7993,124 @@ function AppInner() {
                     {
                       icon: 'wallet-outline',
                       label: t('stats.transfersGold'),
-                      hint: t('stats.hint.transfersGold'),
                       value: s.transfers_gold ?? 0,
                       prev: s.prev_transfers_gold ?? 0,
                       pct: s.pct_transfers_gold,
                       color: '#22d3ee',
                     },
                     {
-                      icon: 'people-outline',
-                      label: t('stats.visitors'),
-                      hint: t('stats.hint.visitors'),
-                      value: s.visitors ?? 0,
-                      prev: s.prev_visitors ?? 0,
-                      pct: s.pct_visitors,
+                      icon: 'flash-outline',
+                      label: t('stats.tipsPerDay'),
+                      value: s.tips_per_day ?? 0,
+                      prev: s.prev_tips_per_day ?? 0,
+                      pct: s.pct_tips_per_day,
+                      color: '#fbbf24',
+                      dec: true,
+                    },
+                    {
+                      icon: 'pulse-outline',
+                      label: t('stats.goldPerVisitor'),
+                      value: s.gold_per_visitor ?? 0,
+                      prev: s.prev_gold_per_visitor ?? 0,
+                      pct: s.pct_gold_per_visitor,
+                      color: '#4ade80',
+                      dec: true,
+                    },
+                    {
+                      icon: 'headset-outline',
+                      label: t('stats.songsPerVisitor'),
+                      value: s.songs_per_visitor ?? 0,
+                      prev: s.prev_songs_per_visitor ?? 0,
+                      pct: s.pct_songs_per_visitor,
+                      color: '#c084fc',
+                      dec: true,
+                    },
+                    // Week/month only: cumulative unique/day sum + active days
+                    ...(statsPeriod !== 'day'
+                      ? [
+                          {
+                            icon: 'layers-outline',
+                            label: t('stats.visitorDays'),
+                            value: s.visitor_days ?? 0,
+                            prev: s.prev_visitor_days ?? 0,
+                            pct: s.pct_visitor_days,
+                            color: '#2dd4bf',
+                          },
+                          {
+                            icon: 'sunny-outline',
+                            label: t('stats.activeDays'),
+                            value: s.active_days ?? 0,
+                            prev: s.prev_active_days ?? 0,
+                            pct: s.pct_active_days,
+                            color: '#fde047',
+                          },
+                        ]
+                      : []),
+                  ];
+                  const seriesKey =
+                    statsPeriod === 'month'
+                      ? 'month'
+                      : statsPeriod === 'week'
+                        ? 'week'
+                        : null;
+                  const series = seriesKey
+                    ? statsPayload?.stats?.series?.[seriesKey] || []
+                    : [];
+                  const seriesMax = Math.max(
+                    1,
+                    ...series.map((d) =>
+                      Math.max(
+                        Number(d.tips_gold) || 0,
+                        Number(d.songs) || 0,
+                        Number(d.visitors) || 0
+                      )
+                    )
+                  );
+                  const boardBlocks = [
+                    {
+                      key: 'tippers',
+                      title: t('stats.top.tippers'),
+                      unit: t('stats.unit.gold'),
+                      color: '#fbbf24',
+                      rows: boards.tippers || [],
+                    },
+                    {
+                      key: 'song_requesters',
+                      title: t('stats.top.requesters'),
+                      unit: t('stats.unit.songs'),
+                      color: '#a78bfa',
+                      rows: boards.song_requesters || [],
+                    },
+                    {
+                      key: 'room_time',
+                      title: t('stats.top.roomTime'),
+                      unit: t('stats.unit.minutes'),
                       color: '#34d399',
+                      rows: boards.room_time || [],
+                    },
+                    {
+                      key: 'skippers',
+                      title: t('stats.top.skippers'),
+                      unit: t('stats.unit.skips'),
+                      color: '#f87171',
+                      rows: boards.skippers || [],
+                    },
+                    {
+                      key: 'bank',
+                      title: t('stats.top.bank'),
+                      unit: t('stats.unit.gold'),
+                      color: '#38bdf8',
+                      rows: boards.bank || [],
+                    },
+                    {
+                      key: 'transfer_out',
+                      title: t('stats.top.transferOut'),
+                      unit: t('stats.unit.gold'),
+                      color: '#22d3ee',
+                      rows: boards.transfer_out || [],
                     },
                   ];
+                  const rankEntries = Object.entries(ranks || {});
                   return (
                     <>
                       <Text style={styles.statsSectionLabel}>
@@ -7946,7 +8139,8 @@ function AppInner() {
                               </Text>
                             </View>
                             <Text style={[styles.statsCardValue, { color: c.color }]}>
-                              {fmt(c.value)}
+                              {c.dec ? fmtDec(c.value) : fmt(c.value)}
+                              {c.suffix ? c.suffix : ''}
                             </Text>
                             <View style={styles.statsCardFoot}>
                               <Text
@@ -7962,11 +8156,79 @@ function AppInner() {
                               </Text>
                             </View>
                             <Text style={styles.statsCardPrev}>
-                              {t('stats.previous')}: {fmt(c.prev)}
+                              {t('stats.previous')}:{' '}
+                              {c.dec ? fmtDec(c.prev) : fmt(c.prev)}
                             </Text>
                           </View>
                         ))}
                       </View>
+
+                      {series.length > 0 ? (
+                        <>
+                          <Text style={[styles.statsSectionLabel, { marginTop: 18 }]}>
+                            {t('stats.trend')}
+                          </Text>
+                          <View style={styles.statsTrendCard}>
+                            <View style={styles.statsTrendLegend}>
+                              <Text style={[styles.statsTrendLegItem, { color: '#fbbf24' }]}>
+                                ● {t('stats.tipsGold')}
+                              </Text>
+                              <Text style={[styles.statsTrendLegItem, { color: '#a78bfa' }]}>
+                                ● {t('stats.songs')}
+                              </Text>
+                              <Text style={[styles.statsTrendLegItem, { color: '#34d399' }]}>
+                                ● {t('stats.visitors')}
+                              </Text>
+                            </View>
+                            <View style={styles.statsTrendBars}>
+                              {series.map((d) => {
+                                const th = Math.max(
+                                  4,
+                                  Math.round(
+                                    ((Number(d.tips_gold) || 0) / seriesMax) * 56
+                                  )
+                                );
+                                const sh = Math.max(
+                                  4,
+                                  Math.round(((Number(d.songs) || 0) / seriesMax) * 56)
+                                );
+                                const vh = Math.max(
+                                  4,
+                                  Math.round(
+                                    ((Number(d.visitors) || 0) / seriesMax) * 56
+                                  )
+                                );
+                                const dayLabel = String(d.date || '').slice(8, 10);
+                                return (
+                                  <View key={d.date} style={styles.statsTrendCol}>
+                                    <View style={styles.statsTrendColBars}>
+                                      <View
+                                        style={[
+                                          styles.statsTrendBar,
+                                          { height: th, backgroundColor: '#fbbf24' },
+                                        ]}
+                                      />
+                                      <View
+                                        style={[
+                                          styles.statsTrendBar,
+                                          { height: sh, backgroundColor: '#a78bfa' },
+                                        ]}
+                                      />
+                                      <View
+                                        style={[
+                                          styles.statsTrendBar,
+                                          { height: vh, backgroundColor: '#34d399' },
+                                        ]}
+                                      />
+                                    </View>
+                                    <Text style={styles.statsTrendDay}>{dayLabel || '—'}</Text>
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        </>
+                      ) : null}
 
                       <Text style={[styles.statsSectionLabel, { marginTop: 18 }]}>
                         {t('stats.lifetime')}
@@ -7997,6 +8259,109 @@ function AppInner() {
                           <Text style={styles.statsLifeUnit}>{t('stats.unit.songs')}</Text>
                         </View>
                       </View>
+                      <View style={[styles.statsLifeRow, { marginTop: 8 }]}>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(248,113,113,0.35)' }]}>
+                          <Ionicons name="play-skip-forward" size={18} color="#f87171" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.skips')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#f87171' }]}>
+                            {fmt(life.skips ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>
+                            {fmtDec(life.skip_rate_pct ?? 0)}%
+                          </Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(251,146,60,0.35)' }]}>
+                          <Ionicons name="close-circle" size={18} color="#fb923c" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.cancels')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#fb923c' }]}>
+                            {fmt(life.cancels ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>
+                            {fmtDec(life.cancel_rate_pct ?? 0)}%
+                          </Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(56,189,248,0.35)' }]}>
+                          <Ionicons name="card" size={18} color="#38bdf8" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.bank')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#38bdf8' }]}>
+                            {fmt(life.bank_total ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>{t('stats.unit.gold')}</Text>
+                        </View>
+                      </View>
+                      <View style={[styles.statsLifeRow, { marginTop: 8 }]}>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(34,211,238,0.35)' }]}>
+                          <Ionicons name="swap-horizontal" size={18} color="#22d3ee" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.transfers')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#22d3ee' }]}>
+                            {fmt(life.transfers_out_gold ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>{t('stats.unit.gold')}</Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(251,191,36,0.35)' }]}>
+                          <Ionicons name="people-circle" size={18} color="#fbbf24" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.tippers')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#fbbf24' }]}>
+                            {fmt(life.tippers_count ?? 0)}
+                          </Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(167,139,250,0.35)' }]}>
+                          <Ionicons name="radio" size={18} color="#a78bfa" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.requesters')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#a78bfa' }]}>
+                            {fmt(life.requesters_count ?? 0)}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {rankEntries.length > 0 ? (
+                        <>
+                          <Text style={[styles.statsSectionLabel, { marginTop: 18 }]}>
+                            {t('stats.ranks')}
+                          </Text>
+                          <View style={styles.statsRankWrap}>
+                            {rankEntries.map(([rank, n]) => (
+                              <View key={rank} style={styles.statsRankChip}>
+                                <Text style={styles.statsRankName}>{rank}</Text>
+                                <Text style={styles.statsRankN}>{fmt(n)}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        </>
+                      ) : null}
+
+                      <Text style={[styles.statsSectionLabel, { marginTop: 18 }]}>
+                        {t('stats.leaderboards')}
+                      </Text>
+                      {boardBlocks.map((b) =>
+                        (b.rows || []).length > 0 ? (
+                          <View key={b.key} style={styles.statsBoardCard}>
+                            <Text style={[styles.statsBoardTitle, { color: b.color }]}>
+                              {b.title}
+                            </Text>
+                            {(b.rows || []).slice(0, 8).map((row, i) => (
+                              <View key={`${b.key}-${row.user}-${i}`} style={styles.statsBoardRow}>
+                                <Text style={styles.statsBoardRank}>{i + 1}</Text>
+                                <Text style={styles.statsBoardUser} numberOfLines={1}>
+                                  {row.user}
+                                </Text>
+                                <Text style={[styles.statsBoardVal, { color: b.color }]}>
+                                  {fmt(row.value)}
+                                </Text>
+                                <Text style={styles.statsBoardUnit}>{b.unit}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        ) : null
+                      )}
+                      {statsPayload?.stats?.tracked_days != null ? (
+                        <Text style={styles.statsFootNote}>
+                          {t('stats.trackedDays')}: {fmt(statsPayload.stats.tracked_days)}
+                          {statsPayload.stats.as_of
+                            ? ` · ${t('stats.asOf')} ${statsPayload.stats.as_of}`
+                            : ''}
+                        </Text>
+                      ) : null}
                     </>
                   );
                 })()}
@@ -8328,33 +8693,63 @@ function AppInner() {
                   </View>
                   <Text style={styles.manageOwnerNote}>{t('manage.levelHelp')}</Text>
 
-                  <Text style={styles.manageFieldLabel}>{t('manage.permissions')}</Text>
-                  <View style={styles.managePermGrid}>
-                    {APP_PERM_KEYS.map((key) => {
-                      const on = managePerms.includes(key);
-                      return (
-                        <Pressable
-                          key={key}
-                          onPress={() => toggleManagePerm(key)}
-                          style={[styles.managePermRow, on && styles.managePermRowOn]}
-                        >
-                          <Ionicons
-                            name={on ? 'checkbox' : 'square-outline'}
-                            size={20}
-                            color={on ? '#fbbf24' : '#64748b'}
-                          />
-                          <View style={{ flex: 1, minWidth: 0 }}>
-                            <Text style={[styles.managePermTitle, on && { color: '#f8fafc' }]}>
-                              {t(`manage.perm.${key}`)}
-                            </Text>
-                            <Text style={styles.managePermDesc} numberOfLines={2}>
-                              {t(`manage.perm.${key}.desc`)}
-                            </Text>
-                          </View>
-                        </Pressable>
-                      );
-                    })}
+                  <View style={styles.managePermToolbar}>
+                    <Text style={styles.manageFieldLabel}>
+                      {t('manage.permissions')} · {managePerms.length}/{APP_PERM_KEYS.length}
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <Pressable
+                        onPress={() => setAllManagePerms(true)}
+                        style={styles.managePermQuickBtn}
+                      >
+                        <Text style={styles.managePermQuickText}>{t('manage.permAll')}</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => setAllManagePerms(false)}
+                        style={styles.managePermQuickBtn}
+                      >
+                        <Text style={styles.managePermQuickText}>{t('manage.permNone')}</Text>
+                      </Pressable>
+                    </View>
                   </View>
+                  {APP_PERM_GROUPS.map((grp) => (
+                    <View key={grp.id} style={styles.managePermGroup}>
+                      <Text style={styles.managePermGroupTitle}>
+                        {t(`manage.group.${grp.id}`)}
+                      </Text>
+                      <View style={styles.managePermGrid}>
+                        {grp.keys.map((key) => {
+                          const on = managePerms.includes(key);
+                          return (
+                            <Pressable
+                              key={key}
+                              onPress={() => toggleManagePerm(key)}
+                              style={[styles.managePermRow, on && styles.managePermRowOn]}
+                            >
+                              <Ionicons
+                                name={on ? 'checkbox' : 'square-outline'}
+                                size={20}
+                                color={on ? '#fbbf24' : '#64748b'}
+                              />
+                              <View style={{ flex: 1, minWidth: 0 }}>
+                                <Text
+                                  style={[
+                                    styles.managePermTitle,
+                                    on && { color: '#f8fafc' },
+                                  ]}
+                                >
+                                  {t(`manage.perm.${key}`)}
+                                </Text>
+                                <Text style={styles.managePermDesc} numberOfLines={2}>
+                                  {t(`manage.perm.${key}.desc`)}
+                                </Text>
+                              </View>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  ))}
 
                   <TouchableOpacity
                     style={[styles.manageCreateBtn, manageCreating && { opacity: 0.6 }]}
@@ -8556,46 +8951,75 @@ function AppInner() {
                               </Text>
                             </Pressable>
                           ))}
+                          <Pressable
+                            onPress={() => setManageEditPerms([...APP_PERM_KEYS])}
+                            style={styles.manageRankChip}
+                          >
+                            <Text style={styles.manageRankChipText}>
+                              {t('manage.permAll')}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => setManageEditPerms([])}
+                            style={styles.manageRankChip}
+                          >
+                            <Text style={styles.manageRankChipText}>
+                              {t('manage.permNone')}
+                            </Text>
+                          </Pressable>
                         </View>
-                        <Text style={styles.manageFieldLabel}>{t('manage.permissions')}</Text>
-                        <View style={styles.managePermGrid}>
-                          {APP_PERM_KEYS.map((key) => {
-                            const on = manageEditPerms.includes(key);
-                            return (
-                              <Pressable
-                                key={`edp-${key}`}
-                                onPress={() => {
-                                  setManageEditPerms((prev) => {
-                                    const s = new Set(prev);
-                                    if (s.has(key)) s.delete(key);
-                                    else s.add(key);
-                                    return APP_PERM_KEYS.filter((k) => s.has(k));
-                                  });
-                                }}
-                                style={[styles.managePermRow, on && styles.managePermRowOn]}
-                              >
-                                <Ionicons
-                                  name={on ? 'checkbox' : 'square-outline'}
-                                  size={20}
-                                  color={on ? '#fbbf24' : '#64748b'}
-                                />
-                                <View style={{ flex: 1 }}>
-                                  <Text
+                        <Text style={styles.manageFieldLabel}>
+                          {t('manage.permissions')} · {manageEditPerms.length}/
+                          {APP_PERM_KEYS.length}
+                        </Text>
+                        {APP_PERM_GROUPS.map((grp) => (
+                          <View key={`edg-${grp.id}`} style={styles.managePermGroup}>
+                            <Text style={styles.managePermGroupTitle}>
+                              {t(`manage.group.${grp.id}`)}
+                            </Text>
+                            <View style={styles.managePermGrid}>
+                              {grp.keys.map((key) => {
+                                const on = manageEditPerms.includes(key);
+                                return (
+                                  <Pressable
+                                    key={`edp-${key}`}
+                                    onPress={() => {
+                                      setManageEditPerms((prev) => {
+                                        const s = new Set(prev);
+                                        if (s.has(key)) s.delete(key);
+                                        else s.add(key);
+                                        return APP_PERM_KEYS.filter((k) => s.has(k));
+                                      });
+                                    }}
                                     style={[
-                                      styles.managePermTitle,
-                                      on && { color: '#f8fafc' },
+                                      styles.managePermRow,
+                                      on && styles.managePermRowOn,
                                     ]}
                                   >
-                                    {t(`manage.perm.${key}`)}
-                                  </Text>
-                                  <Text style={styles.managePermDesc} numberOfLines={2}>
-                                    {t(`manage.perm.${key}.desc`)}
-                                  </Text>
-                                </View>
-                              </Pressable>
-                            );
-                          })}
-                        </View>
+                                    <Ionicons
+                                      name={on ? 'checkbox' : 'square-outline'}
+                                      size={20}
+                                      color={on ? '#fbbf24' : '#64748b'}
+                                    />
+                                    <View style={{ flex: 1 }}>
+                                      <Text
+                                        style={[
+                                          styles.managePermTitle,
+                                          on && { color: '#f8fafc' },
+                                        ]}
+                                      >
+                                        {t(`manage.perm.${key}`)}
+                                      </Text>
+                                      <Text style={styles.managePermDesc} numberOfLines={2}>
+                                        {t(`manage.perm.${key}.desc`)}
+                                      </Text>
+                                    </View>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        ))}
                       </>
                     ) : null}
 
@@ -8761,7 +9185,7 @@ function AppInner() {
         ) : null}
 
         {/* ===== TAB: SECURITY (OWNER only) ===== */}
-        {safeMainTab === 'security' && isOwner ? (
+        {safeMainTab === 'security' && canSecurityTab ? (
           <ScrollView
             style={styles.tabBody}
             contentContainerStyle={[
@@ -9073,7 +9497,7 @@ function AppInner() {
                 }}
               />
             ) : null}
-            {isOwner ? (
+            {canSecurityTab ? (
               <BottomNavItem
                 active={safeMainTab === 'security'}
                 icon="lock-closed-outline"
@@ -10775,6 +11199,161 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
   },
+  statsPeakRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  statsPeakCard: {
+    flex: 1,
+    minWidth: '28%',
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+  },
+  statsPeakLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  statsPeakValue: {
+    fontSize: 20,
+    fontWeight: '800',
+    marginTop: 4,
+  },
+  statsPeakDate: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  statsRankWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  statsRankChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(15,23,42,0.9)',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  statsRankName: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'capitalize',
+  },
+  statsRankN: {
+    color: '#38bdf8',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  statsBoardCard: {
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    marginBottom: 10,
+  },
+  statsBoardTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  statsBoardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 5,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#1e293b',
+  },
+  statsBoardRank: {
+    width: 22,
+    color: '#64748b',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  statsBoardUser: {
+    flex: 1,
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  statsBoardVal: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  statsBoardUnit: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '600',
+    minWidth: 36,
+    textAlign: 'right',
+  },
+  statsFootNote: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 8,
+    marginBottom: 12,
+    fontWeight: '600',
+  },
+  statsTrendCard: {
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    marginBottom: 4,
+  },
+  statsTrendLegend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginBottom: 10,
+  },
+  statsTrendLegItem: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  statsTrendBars: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    minHeight: 72,
+    gap: 2,
+  },
+  statsTrendCol: {
+    flex: 1,
+    alignItems: 'center',
+    minWidth: 0,
+  },
+  statsTrendColBars: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 1,
+    height: 60,
+  },
+  statsTrendBar: {
+    width: 4,
+    borderRadius: 2,
+    minHeight: 3,
+  },
+  statsTrendDay: {
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '700',
+    marginTop: 4,
+  },
   bottomNav: {
     position: 'absolute',
     left: 0,
@@ -11777,6 +12356,36 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.06)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  managePermToolbar: {
+    marginTop: 4,
+    marginBottom: 6,
+    gap: 8,
+  },
+  managePermQuickBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: 'rgba(30,41,59,0.8)',
+  },
+  managePermQuickText: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  managePermGroup: {
+    marginBottom: 10,
+  },
+  managePermGroupTitle: {
+    color: '#fbbf24',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    marginBottom: 6,
+    marginTop: 4,
+    textTransform: 'uppercase',
   },
   managePermGrid: { gap: 8, marginTop: 4, marginBottom: 4 },
   managePermRow: {
