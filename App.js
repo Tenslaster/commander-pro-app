@@ -156,7 +156,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.5';
+const APP_VERSION = '1.4.6';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -268,11 +268,18 @@ const BIOMETRIC_KEY = 'biometric_enabled';
 const APP_PERM_KEYS = [
   'status',
   'control',
+  'control_start',
+  'control_stop',
+  'control_restart',
   'bot_config',
+  'room_edit',
+  'api_key_edit',
   'logs',
   'commands',
   'chat',
   'chat_send',
+  'chat_edit',
+  'chat_delete',
   'alerts',
   'stats',
   'users',
@@ -282,23 +289,48 @@ const APP_PERM_KEYS = [
   'bank',
   'manage_users',
   'playlist',
+  'playlist_add',
+  'playlist_delete',
   'listen',
   'security',
 ];
 /** Groups for Gestion UI (give/remove rights by category).
- *  'security' only appears for real OWNER when creating/editing accounts. */
+ *  'security' only appears for real OWNER when creating/editing accounts.
+ *  Push announce (notify) is OWNER-only — not listed here. */
 const APP_PERM_GROUPS = [
   {
     id: 'radios',
-    keys: ['status', 'control', 'bot_config', 'logs', 'commands', 'listen'],
+    keys: [
+      'status',
+      'control',
+      'control_start',
+      'control_stop',
+      'control_restart',
+      'bot_config',
+      'room_edit',
+      'api_key_edit',
+      'logs',
+      'commands',
+      'listen',
+    ],
   },
   {
     id: 'social',
-    keys: ['chat', 'chat_send', 'alerts'],
+    keys: ['chat', 'chat_send', 'chat_edit', 'chat_delete', 'alerts'],
   },
   {
     id: 'data',
-    keys: ['stats', 'users', 'users_edit', 'ranks', 'bans', 'bank', 'playlist'],
+    keys: [
+      'stats',
+      'users',
+      'users_edit',
+      'ranks',
+      'bans',
+      'bank',
+      'playlist',
+      'playlist_add',
+      'playlist_delete',
+    ],
   },
   {
     id: 'admin',
@@ -315,14 +347,22 @@ const APP_LEVEL_PRESETS = {
     'alerts',
     'chat',
     'chat_send',
+    'chat_edit',
     'stats',
     'listen',
     'users',
     'control',
+    'control_start',
+    'control_stop',
+    'control_restart',
     'logs',
     'commands',
     'bot_config',
+    'room_edit',
+    'api_key_edit',
     'playlist',
+    'playlist_add',
+    'playlist_delete',
   ],
   // Admin = full radio ops including manage_users; never auto-include security
   admin: APP_PERM_KEYS.filter((k) => k !== 'security'),
@@ -1706,17 +1746,25 @@ const ProcessCard = React.memo(
     listenPlaying,
     t,
     allowControl = true,
+    allowStart = true,
+    allowStop = true,
+    allowRestart = true,
     allowLogs = true,
     allowBotConfig = true,
+    allowRoomEdit = true,
+    allowApiKeyEdit = true,
   }) => {
     const tr = typeof t === 'function' ? t : (k) => k;
     const isRunning = item.status === 'RUNNING';
     const isError = item.status === 'ERROR';
     // ERROR / STOPPED → can start; RUNNING / ERROR → can restart; RUNNING only → kill
-    const canStart = allowControl && !isRunning;
-    const canKill = allowControl && isRunning;
-    const canRestart = allowControl && (isRunning || isError);
     const isBot = isBotProcess(item);
+    const canStart = (allowControl || allowStart) && !isRunning;
+    const canKill = (allowControl || allowStop) && isRunning;
+    const canRestart = (allowControl || allowRestart) && (isRunning || isError);
+    const showStartStopRestart = canStart || canKill || canRestart;
+    const showRoom = isBot && (allowBotConfig || allowRoomEdit);
+    const showApiKey = isBot && (allowBotConfig || allowApiKeyEdit);
     // Main radio process for this station → show Listen next to start/stop
     const stationFromId = (() => {
       const id = String(item?.id || item?.name || '');
@@ -1807,7 +1855,7 @@ const ProcessCard = React.memo(
             )}
           </TouchableOpacity>
 
-          {allowControl || showListen || (isBot && allowBotConfig) ? (
+          {showStartStopRestart || showListen || showRoom || showApiKey ? (
             <View style={styles.actionRow}>
               {showListen ? (
                 <TouchableOpacity
@@ -1832,7 +1880,7 @@ const ProcessCard = React.memo(
                   />
                 </TouchableOpacity>
               ) : null}
-              {allowControl ? (
+              {showStartStopRestart ? (
                 <>
                   <TouchableOpacity
                     style={[
@@ -1872,25 +1920,25 @@ const ProcessCard = React.memo(
                   </TouchableOpacity>
                 </>
               ) : null}
-              {isBot && allowBotConfig ? (
-                <>
-                  <TouchableOpacity
-                    style={[styles.iconButton, { backgroundColor: '#a855f7' }]}
-                    onPress={() => onEditRoom?.(item)}
-                    accessibilityLabel={`${tr('process.room')} ${item.name}`}
-                    hitSlop={HIT_SLOP_SM}
-                  >
-                    <Ionicons name="home" size={18} color="#fff" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.iconButton, { backgroundColor: '#f59e0b' }]}
-                    onPress={() => onEditApiKey?.(item)}
-                    accessibilityLabel={`${tr('process.key')} ${item.name}`}
-                    hitSlop={HIT_SLOP_SM}
-                  >
-                    <Ionicons name="key" size={18} color="#fff" />
-                  </TouchableOpacity>
-                </>
+              {showRoom ? (
+                <TouchableOpacity
+                  style={[styles.iconButton, { backgroundColor: '#a855f7' }]}
+                  onPress={() => onEditRoom?.(item)}
+                  accessibilityLabel={`${tr('process.room')} ${item.name}`}
+                  hitSlop={HIT_SLOP_SM}
+                >
+                  <Ionicons name="home" size={18} color="#fff" />
+                </TouchableOpacity>
+              ) : null}
+              {showApiKey ? (
+                <TouchableOpacity
+                  style={[styles.iconButton, { backgroundColor: '#f59e0b' }]}
+                  onPress={() => onEditApiKey?.(item)}
+                  accessibilityLabel={`${tr('process.key')} ${item.name}`}
+                  hitSlop={HIT_SLOP_SM}
+                >
+                  <Ionicons name="key" size={18} color="#fff" />
+                </TouchableOpacity>
               ) : null}
             </View>
           ) : null}
@@ -1902,8 +1950,13 @@ const ProcessCard = React.memo(
     processRowEqual(prev.item, next.item) &&
     prev.t === next.t &&
     prev.allowControl === next.allowControl &&
+    prev.allowStart === next.allowStart &&
+    prev.allowStop === next.allowStop &&
+    prev.allowRestart === next.allowRestart &&
     prev.allowLogs === next.allowLogs &&
     prev.allowBotConfig === next.allowBotConfig &&
+    prev.allowRoomEdit === next.allowRoomEdit &&
+    prev.allowApiKeyEdit === next.allowApiKeyEdit &&
     prev.onOpenTerminal === next.onOpenTerminal &&
     prev.onSendCommand === next.onSendCommand &&
     prev.onLongPress === next.onLongPress &&
@@ -2439,14 +2492,53 @@ function AppInner() {
   // Gestion: OWNER or app users with manage_users (their radio only on API)
   const canManageAppUsers =
     isOwner || isMasterLogin || hasPerm('manage_users');
-  const canControlRadios = isOwner || isMasterLogin || hasPerm('control');
+  // Process control — umbrella `control` OR granular start/stop/restart
+  const canStartRadio =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('control') ||
+    hasPerm('control_start');
+  const canStopRadio =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('control') ||
+    hasPerm('control_stop');
+  const canRestartRadio =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('control') ||
+    hasPerm('control_restart');
+  const canControlRadios =
+    canStartRadio || canStopRadio || canRestartRadio;
   const canOpenLogs = isOwner || isMasterLogin || hasPerm('logs');
-  const canBotConfig = isOwner || isMasterLogin || hasPerm('bot_config');
+  const canEditRoom =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('bot_config') ||
+    hasPerm('room_edit');
+  const canEditApiKey =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('bot_config') ||
+    hasPerm('api_key_edit');
+  const canBotConfig = canEditRoom || canEditApiKey;
   const canCommands =
     isOwner || isMasterLogin || hasPerm('commands') || hasPerm('logs');
   const canChat = isOwner || isMasterLogin || hasPerm('chat');
   const canChatSend = isOwner || isMasterLogin || hasPerm('chat_send');
+  const canChatEdit =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('chat_edit') ||
+    hasPerm('chat_send');
+  const canChatDelete =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('chat_delete') ||
+    hasPerm('chat_send');
   const canAlerts = isOwner || isMasterLogin || hasPerm('alerts');
+  // Push announce = real OWNER only (Centre de commande) — never grantable
+  const canNotify = isOwner;
   const canUsersTab =
     isOwner ||
     isMasterLogin ||
@@ -2475,9 +2567,26 @@ function AppInner() {
     hasPerm('stats') ||
     hasPerm('status') ||
     hasPerm('users');
-  // playlist right, or legacy control (operators already had control before playlist perm)
+  // Playlist view / add / delete (umbrella playlist keeps full write)
   const canPlaylist =
-    isOwner || isMasterLogin || hasPerm('playlist') || hasPerm('control');
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('playlist') ||
+    hasPerm('playlist_add') ||
+    hasPerm('playlist_delete') ||
+    hasPerm('control');
+  const canPlaylistAdd =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('playlist') ||
+    hasPerm('playlist_add') ||
+    hasPerm('control');
+  const canPlaylistDelete =
+    isOwner ||
+    isMasterLogin ||
+    hasPerm('playlist') ||
+    hasPerm('playlist_delete') ||
+    hasPerm('control');
   const canListen =
     isOwner || isMasterLogin || hasPerm('listen') || hasPerm('status');
   // Security console: real OWNER only — never RADIO# masters (even with full rights).
@@ -4267,7 +4376,7 @@ function AppInner() {
       if (!isMine && !isOwnerUser) return;
 
       const buttons = [];
-      if (isMine && msg.text) {
+      if (isMine && msg.text && canChatEdit) {
         buttons.push({
           text: 'Modifier',
           onPress: () => {
@@ -4277,7 +4386,7 @@ function AppInner() {
           },
         });
       }
-      if (isMine || isOwnerUser) {
+      if ((isMine || isOwnerUser) && canChatDelete) {
         buttons.push({
           text: 'Supprimer',
           style: 'destructive',
@@ -4309,11 +4418,19 @@ function AppInner() {
           },
         });
       }
+      if (buttons.length === 0) return;
       buttons.push({ text: 'Annuler', style: 'cancel' });
       const who = chatRoleLabel(msg);
       Alert.alert('Message', isMine ? 'Votre message' : `Message de ${who}`, buttons);
     },
-    [fetchChatChannels, fetchChatMessages, handleLogout, isMyChatMessage]
+    [
+      fetchChatChannels,
+      fetchChatMessages,
+      handleLogout,
+      isMyChatMessage,
+      canChatEdit,
+      canChatDelete,
+    ]
   );
 
   const sendChatMessage = useCallback(async () => {
@@ -4328,6 +4445,10 @@ function AppInner() {
 
     // Edit mode
     if (chatEditTarget?.id) {
+      if (!canChatEdit) {
+        Alert.alert(t('err.forbidden'), t('manage.noChatSend'));
+        return;
+      }
       if (!text) {
         Alert.alert('Chat', 'Le message ne peut pas être vide.');
         return;
@@ -4433,6 +4554,7 @@ function AppInner() {
     sendTypingPing,
     scrollChatToEnd,
     canChatSend,
+    canChatEdit,
     t,
   ]);
 
@@ -4440,7 +4562,12 @@ function AppInner() {
     async (target, command) => {
       const token = authTokenRef.current;
       if (!token) return;
-      if (!canControlRadios) {
+      const cmd = String(command || '').toUpperCase();
+      const allowed =
+        (cmd === 'START' && canStartRadio) ||
+        (cmd === 'KILL' && canStopRadio) ||
+        (cmd === 'RESTART' && canRestartRadio);
+      if (!allowed) {
         Alert.alert(t('err.forbidden'), t('manage.noControl'));
         return;
       }
@@ -4476,7 +4603,16 @@ function AppInner() {
         fetchStatus(true);
       }
     },
-    [fetchStatus, handleLogout, pushActionLog, scheduleRefresh, canControlRadios, t]
+    [
+      fetchStatus,
+      handleLogout,
+      pushActionLog,
+      scheduleRefresh,
+      canStartRadio,
+      canStopRadio,
+      canRestartRadio,
+      t,
+    ]
   );
 
   const doGlobalAction = useCallback(
@@ -4707,7 +4843,7 @@ function AppInner() {
 
   const addPlaylistSong = useCallback(async () => {
     const token = authTokenRef.current;
-    if (!token || !canPlaylist || playlistAdding) return;
+    if (!token || !canPlaylistAdd || playlistAdding) return;
     const q = playlistQuery.trim();
     if (!q) {
       Alert.alert(t('playlist.add'), t('playlist.needQuery'));
@@ -4743,7 +4879,7 @@ function AppInner() {
       if (mountedRef.current) setPlaylistAdding(false);
     }
   }, [
-    canPlaylist,
+    canPlaylistAdd,
     playlistAdding,
     playlistQuery,
     playlistDownload,
@@ -4757,6 +4893,10 @@ function AppInner() {
 
   const deletePlaylistSong = useCallback(
     (song) => {
+      if (!canPlaylistDelete) {
+        Alert.alert(t('err.forbidden'), t('manage.noPlaylist'));
+        return;
+      }
       if (!song?.name || !canPlaylist) return;
       const station = effectivePlaylistStation;
       Alert.alert(
@@ -4796,10 +4936,14 @@ function AppInner() {
         ]
       );
     },
-    [canPlaylist, effectivePlaylistStation, handleLogout, showBanner, t]
+    [canPlaylist, canPlaylistDelete, effectivePlaylistStation, handleLogout, showBanner, t]
   );
 
   const clearPlaylistAll = useCallback(() => {
+    if (!canPlaylistDelete) {
+      Alert.alert(t('err.forbidden'), t('manage.noPlaylist'));
+      return;
+    }
     if (!canPlaylist) return;
     const station = effectivePlaylistStation;
     Alert.alert(
@@ -5595,6 +5739,7 @@ function AppInner() {
 
   const sendNotification = useCallback(async () => {
     const token = authTokenRef.current;
+    // Real OWNER only — managers / masters never send broadcast push
     if (!token || !isOwner || sendingNotify) return;
 
     const title = notifyTitle.trim();
@@ -5843,7 +5988,15 @@ function AppInner() {
   const openBotConfigEditor = useCallback(
     (item, field) => {
       if (!item?.id || !isBotProcess(item)) return;
-      if (!canBotConfig) {
+      if (field === 'room' && !canEditRoom) {
+        Alert.alert(t('err.forbidden'), t('manage.noBotConfig'));
+        return;
+      }
+      if (field === 'key' && !canEditApiKey) {
+        Alert.alert(t('err.forbidden'), t('manage.noBotConfig'));
+        return;
+      }
+      if (field !== 'room' && field !== 'key' && !canBotConfig) {
         Alert.alert(t('err.forbidden'), t('manage.noBotConfig'));
         return;
       }
@@ -5855,7 +6008,7 @@ function AppInner() {
         draft: field === 'room' ? item.room_id || '' : '',
       });
     },
-    [canBotConfig, t]
+    [canBotConfig, canEditRoom, canEditApiKey, t]
   );
 
   const closeBotConfigEditor = useCallback(() => {
@@ -7028,8 +7181,13 @@ function AppInner() {
         listenPlaying={listenPlaying}
         t={t}
         allowControl={canControlRadios}
+        allowStart={canStartRadio}
+        allowStop={canStopRadio}
+        allowRestart={canRestartRadio}
         allowLogs={canOpenLogs}
         allowBotConfig={canBotConfig}
+        allowRoomEdit={canEditRoom}
+        allowApiKeyEdit={canEditApiKey}
       />
     ),
     [
@@ -7042,8 +7200,13 @@ function AppInner() {
       listenPlaying,
       t,
       canControlRadios,
+      canStartRadio,
+      canStopRadio,
+      canRestartRadio,
       canOpenLogs,
       canBotConfig,
+      canEditRoom,
+      canEditApiKey,
     ]
   );
 
