@@ -18,7 +18,7 @@ EXPORT = ROOT / "dist-ios-export"
 OUT_IPA = ROOT / "dist" / "ipa" / "CommanderPro.ipa"
 BACKUP = ROOT / "dist" / "ipa" / "CommanderPro-pre-repack-backup.ipa"
 WORK = ROOT / "dist-ipa-work"
-VERSION = "1.3.8"
+VERSION = "1.4.3"
 
 
 def main() -> int:

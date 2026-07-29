@@ -103,16 +103,33 @@ jobs:
           fi
           ls -la ios
 
-      - name: Restore Pods cache
+      - name: Restore CocoaPods repo cache only
         uses: actions/cache/restore@v5
         id: pods-cache
         with:
+          # Do NOT restore ios/Pods over a fresh prebuild — stale Pods cause:
+          # "sandbox is not in sync with the Podfile.lock"
           path: |
-            ios/Pods
             ~/.cocoapods/repos
-          key: pods-ios-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', 'package-lock.json') }}
+          key: cocoapods-repos-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            pods-ios-${{ runner.os }}-
+            cocoapods-repos-${{ runner.os }}-
+
+      - name: pod install (always after prebuild)
+        if: steps.detect.outputs.type == 'expo'
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          # Force a clean Pods tree so Manifest.lock always matches prebuild
+          rm -rf Pods
+          if command -v pod >/dev/null 2>&1; then
+            pod install --repo-update=false || pod install
+          else
+            npx --yes pod-install
+          fi
+          test -d Pods
+          test -f Podfile.lock
+          echo "Pods OK ($(du -sh Pods | awk '{print $1}'))"
 
       - name: Install certificate and provisioning profile
         if: inputs.use_signing
@@ -166,11 +183,18 @@ jobs:
           WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
           PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1 || true)
 
-          # Pods should already be installed by `expo prebuild` (no --no-install).
-          # Only re-run if Pods missing (cache restore edge case).
+          # Pods installed in dedicated step; re-run only if missing
           if [ -f "Podfile" ] && [ ! -d "Pods" ]; then
-            echo "Pods missing — installing via Expo (npx pod-install)..."
-            npx --yes pod-install || pod install
+            echo "Pods missing — installing..."
+            pod install || npx --yes pod-install
+          fi
+          # Sanity: Manifest.lock must match
+          if [ -f "Podfile.lock" ] && [ -f "Pods/Manifest.lock" ]; then
+            if ! diff -q Podfile.lock Pods/Manifest.lock >/dev/null; then
+              echo "Manifest.lock drift — re-running pod install"
+              rm -rf Pods
+              pod install || npx --yes pod-install
+            fi
           fi
           WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1 || true)
 
@@ -288,14 +312,13 @@ jobs:
           path: DerivedData
           key: deriveddata-ios-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json') }}
 
-      - name: Save Pods cache
+      - name: Save CocoaPods repo cache
         uses: actions/cache/save@v5
-        if: always() && hashFiles('ios/Podfile.lock') != ''
+        if: always()
         with:
           path: |
-            ios/Pods
             ~/.cocoapods/repos
-          key: pods-ios-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', 'package-lock.json') }}
+          key: cocoapods-repos-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Cleanup signing
         if: always() && inputs.use_signing
