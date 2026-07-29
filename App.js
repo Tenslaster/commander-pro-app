@@ -156,7 +156,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.6';
+const APP_VERSION = '1.4.7';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -3655,9 +3655,18 @@ function AppInner() {
       try {
         if (isManualRefresh && mountedRef.current) setRefreshing(true);
 
-        const data = await apiFetch('/status', { token, timeoutMs: 12000 });
-        if (!data || typeof data !== 'object' || Array.isArray(data) || !mountedRef.current)
+        // 15s — CF tunnel / mobile can be slow; false "offline" if too short
+        const data = await apiFetch('/status', { token, timeoutMs: 15000 });
+        if (!mountedRef.current) return false;
+        // Empty process map is still a valid online response
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          // Got a response but unexpected shape — do NOT treat as offline
+          netFailCountRef.current = 0;
+          setConnectionOk(true);
+          lastSyncAtRef.current = Date.now();
+          setStatusLoaded(true);
           return false;
+        }
 
         // 1.3.4: single-pass map + sort without intermediate filter alloc
         const keys = Object.keys(data);
@@ -3753,7 +3762,8 @@ function AppInner() {
         }
         setStatusLoaded((prev) => (prev ? prev : true));
         netFailCountRef.current = 0;
-        setConnectionOk((prev) => (prev ? prev : true));
+        // Always clear offline banner on a real /status success
+        setConnectionOk(true);
         if (statusChanged || isManualRefresh) {
           cacheSet('status', '', procArray).catch(() => {});
         }
@@ -3802,14 +3812,41 @@ function AppInner() {
           handleLogout();
           return false;
         }
+        // Cancelled / superseded requests — not real offline
+        if (
+          error.code === 'ABORT' ||
+          error.name === 'AbortError' ||
+          error.code === 'CONFIG'
+        ) {
+          return false;
+        }
         // Background / tab-out network blips: never treat as a hard error
         if (appStateRef.current !== 'active') {
           return false;
         }
-        // Soft offline: only flip UI after a few consecutive failures while foreground
+        // Recent success: stay "online" through short CF/mobile blips
+        const lastOk = lastSyncAtRef.current || 0;
+        const recentOk = lastOk > 0 && Date.now() - lastOk < 45000;
+        // Soft offline: need several consecutive fails (manual refresh needs 2+)
         netFailCountRef.current += 1;
-        if (netFailCountRef.current >= 3 || isManualRefresh) {
-          setConnectionOk(false);
+        const needFails = isManualRefresh ? 2 : 5;
+        if (netFailCountRef.current >= needFails && !recentOk) {
+          // One cheap health check before flipping the red offline pill
+          try {
+            await apiFetch('/health', { timeoutMs: 6000 });
+            netFailCountRef.current = 0;
+            setConnectionOk(true);
+            lastSyncAtRef.current = Date.now();
+            return false;
+          } catch (healthErr) {
+            if (
+              healthErr?.code === 'ABORT' ||
+              healthErr?.name === 'AbortError'
+            ) {
+              return false;
+            }
+            setConnectionOk(false);
+          }
         }
         // No Alert / no banner for "Serveur injoignable" on polling
       } finally {
@@ -3949,6 +3986,9 @@ function AppInner() {
           { token, timeoutMs: 10000 }
         );
         if (!mountedRef.current) return false;
+        // Any live API success keeps the online pill (not only /status)
+        netFailCountRef.current = 0;
+        setConnectionOk(true);
         const items = Array.isArray(data?.items) ? data.items : [];
         // O(1) edge fingerprint — avoid O(n) title/body walk every poll
         const fp = fingerprintNotify(items);
@@ -8333,15 +8373,7 @@ function AppInner() {
                       pct: s.pct_transfers_gold,
                       color: '#22d3ee',
                     },
-                    {
-                      icon: 'flash-outline',
-                      label: t('stats.tipsPerDay'),
-                      value: s.tips_per_day ?? 0,
-                      prev: s.prev_tips_per_day ?? 0,
-                      pct: s.pct_tips_per_day,
-                      color: '#fbbf24',
-                      dec: true,
-                    },
+                    // tips_per_day removed — duplicated "Tips reçus" on day period
                     {
                       icon: 'pulse-outline',
                       label: t('stats.goldPerVisitor'),
