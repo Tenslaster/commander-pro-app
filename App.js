@@ -2291,6 +2291,8 @@ function AppInner() {
   const [manageEditPassword, setManageEditPassword] = useState('');
   const [manageEditSaving, setManageEditSaving] = useState(false);
   const [manageEditPwdOnly, setManageEditPwdOnly] = useState(false);
+  /** Create form collapsed when staff list is long — managers focus on editing rights */
+  const [manageShowCreate, setManageShowCreate] = useState(true);
   const usersFetchGenRef = useRef(0);
   const usersAbortRef = useRef(null);
   const usersSearchAbortRef = useRef(null);
@@ -2514,31 +2516,137 @@ function AppInner() {
     [managePermKeysAllowed]
   );
 
-  const toggleManagePerm = useCallback((key) => {
-    if (!managePermKeysAllowed.includes(key)) return;
-    // Non-OWNER can never toggle security
-    if (key === 'security' && !canGrantSecurity) return;
-    setManagePerms((prev) => {
-      const set = new Set(prev);
-      if (set.has(key)) set.delete(key);
-      else set.add(key);
-      const next = managePermKeysAllowed.filter((k) => set.has(k));
-      // Sync preset label if exact match
-      let match = 'custom';
+  const inferManageLevel = useCallback(
+    (perms) => {
+      const next = managePermKeysAllowed.filter((k) => (perms || []).includes(k));
       for (const lv of APP_LEVELS) {
         const preset = APP_LEVEL_PRESETS[lv] || [];
         if (
           preset.length === next.length &&
           preset.every((p) => next.includes(p))
         ) {
-          match = lv;
-          break;
+          return lv;
         }
       }
-      setManageLevel(match);
-      return next;
-    });
-  }, [managePermKeysAllowed, canGrantSecurity]);
+      return 'custom';
+    },
+    [managePermKeysAllowed]
+  );
+
+  const normalizeManagePerms = useCallback(
+    (list) => {
+      const set = new Set(list || []);
+      return managePermKeysAllowed.filter((k) => {
+        if (k === 'security' && !canGrantSecurity) return false;
+        return set.has(k);
+      });
+    },
+    [managePermKeysAllowed, canGrantSecurity]
+  );
+
+  const toggleManagePerm = useCallback(
+    (key) => {
+      if (!managePermKeysAllowed.includes(key)) return;
+      if (key === 'security' && !canGrantSecurity) return;
+      setManagePerms((prev) => {
+        const set = new Set(prev);
+        if (set.has(key)) set.delete(key);
+        else set.add(key);
+        const next = normalizeManagePerms([...set]);
+        setManageLevel(inferManageLevel(next));
+        return next;
+      });
+    },
+    [
+      managePermKeysAllowed,
+      canGrantSecurity,
+      normalizeManagePerms,
+      inferManageLevel,
+    ]
+  );
+
+  /** Toggle every right in a category (radios / social / data / admin) */
+  const toggleManageGroup = useCallback(
+    (keys, turnOn) => {
+      const group = (keys || []).filter(
+        (k) =>
+          managePermKeysAllowed.includes(k) &&
+          !(k === 'security' && !canGrantSecurity)
+      );
+      if (!group.length) return;
+      setManagePerms((prev) => {
+        const set = new Set(prev);
+        if (turnOn) group.forEach((k) => set.add(k));
+        else group.forEach((k) => set.delete(k));
+        const next = normalizeManagePerms([...set]);
+        setManageLevel(inferManageLevel(next));
+        return next;
+      });
+    },
+    [
+      managePermKeysAllowed,
+      canGrantSecurity,
+      normalizeManagePerms,
+      inferManageLevel,
+    ]
+  );
+
+  const toggleManageEditPerm = useCallback(
+    (key) => {
+      if (!managePermKeysAllowed.includes(key)) return;
+      if (key === 'security' && !canGrantSecurity) return;
+      setManageEditPerms((prev) => {
+        const set = new Set(prev);
+        if (set.has(key)) set.delete(key);
+        else set.add(key);
+        return normalizeManagePerms([...set]);
+      });
+    },
+    [managePermKeysAllowed, canGrantSecurity, normalizeManagePerms]
+  );
+
+  const toggleManageEditGroup = useCallback(
+    (keys, turnOn) => {
+      const group = (keys || []).filter(
+        (k) =>
+          managePermKeysAllowed.includes(k) &&
+          !(k === 'security' && !canGrantSecurity)
+      );
+      if (!group.length) return;
+      setManageEditPerms((prev) => {
+        const set = new Set(prev);
+        if (turnOn) group.forEach((k) => set.add(k));
+        else group.forEach((k) => set.delete(k));
+        return normalizeManagePerms([...set]);
+      });
+    },
+    [managePermKeysAllowed, canGrantSecurity, normalizeManagePerms]
+  );
+
+  const openManageEditRights = useCallback(
+    (u) => {
+      if (!u) return;
+      setManageEditPwdOnly(false);
+      setManageEditUser(u);
+      const base =
+        Array.isArray(u.permissions) && u.permissions.length
+          ? [...u.permissions]
+          : [...(APP_LEVEL_PRESETS[u.level] || APP_LEVEL_PRESETS.viewer)];
+      // Keep security flag if already granted (non-OWNER cannot see/toggle it)
+      const next = normalizeManagePerms(base);
+      if (
+        !canGrantSecurity &&
+        Array.isArray(u.permissions) &&
+        u.permissions.includes('security') &&
+        !next.includes('security')
+      ) {
+        next.push('security');
+      }
+      setManageEditPerms(next);
+      setManageEditPassword('');
+    },
+    [normalizeManagePerms, canGrantSecurity]
+  );
 
   const pushActionLog = useCallback((text) => {
     const line = `${new Date().toLocaleTimeString()} — ${text}`;
@@ -8618,7 +8726,7 @@ function AppInner() {
           </View>
         ) : null}
 
-        {/* ===== TAB: MANAGEMENT — app login accounts (not Highrise) ===== */}
+        {/* ===== TAB: MANAGEMENT — radio staff rights (one-by-one) ===== */}
         {safeMainTab === 'manage' ? (
           <View style={styles.tabBody}>
             {!canManageAppUsers ? (
@@ -8644,6 +8752,34 @@ function AppInner() {
                   />
                 }
               >
+                {/* Hero — managers are admins of their radio only */}
+                <View style={styles.manageHero}>
+                  <Ionicons name="people-circle" size={36} color="#fbbf24" />
+                  <Text style={styles.manageHeroTitle}>{t('manage.heroTitle')}</Text>
+                  <Text style={styles.manageHeroSub}>
+                    {isOwner ? t('manage.subtitleOwner') : t('manage.heroRadio')}
+                  </Text>
+                  {!isOwner ? (
+                    <View style={styles.manageStationLock}>
+                      <Ionicons
+                        name="radio"
+                        size={14}
+                        color={ROLE_COLORS[userRole] || '#94a3b8'}
+                      />
+                      <Text
+                        style={[
+                          styles.manageStationLockText,
+                          { color: ROLE_COLORS[userRole] || '#94a3b8' },
+                        ]}
+                      >
+                        {userRole}
+                      </Text>
+                      <Text style={styles.manageStationLockHint}>
+                        {t('manage.subtitleRadio')}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
 
                 {isOwner ? (
                   <>
@@ -8658,7 +8794,10 @@ function AppInner() {
                             onPress={() => setManageStation(st)}
                             style={[
                               styles.manageRankChip,
-                              active && { backgroundColor: `${col}33`, borderColor: col },
+                              active && {
+                                backgroundColor: `${col}33`,
+                                borderColor: col,
+                              },
                             ]}
                           >
                             <Text
@@ -8674,171 +8813,16 @@ function AppInner() {
                       })}
                     </View>
                   </>
-                ) : (
-                  <View style={styles.manageStationLock}>
-                    <Ionicons
-                      name="lock-closed"
-                      size={14}
-                      color={ROLE_COLORS[userRole] || '#94a3b8'}
-                    />
-                    <Text
-                      style={[
-                        styles.manageStationLockText,
-                        { color: ROLE_COLORS[userRole] || '#94a3b8' },
-                      ]}
-                    >
-                      {userRole}
-                    </Text>
-                    <Text style={styles.manageStationLockHint}>
-                      {t('manage.subtitleRadio')}
-                    </Text>
-                  </View>
-                )}
+                ) : null}
 
-                <View style={styles.manageCard}>
-                  <Text style={styles.manageCardTitle}>{t('manage.createApp')}</Text>
-                  <TextInput
-                    style={styles.manageInput}
-                    placeholder={t('login.username')}
-                    {...darkInputProps}
-                    value={manageUsername}
-                    onChangeText={setManageUsername}
-                    autoCapitalize="none"
-                    autoComplete="off"
-                  />
-                  <Text style={styles.manageFieldLabel}>{t('manage.password')}</Text>
-                  <TextInput
-                    style={styles.manageInput}
-                    placeholder={t('manage.passwordHint')}
-                    {...darkInputProps}
-                    secureTextEntry
-                    value={managePassword}
-                    onChangeText={setManagePassword}
-                    autoCapitalize="none"
-                  />
-                  <Text style={styles.manageFieldLabel}>{t('manage.presets')}</Text>
-                  <View style={styles.manageRankWrap}>
-                    {APP_LEVELS.map((lv) => {
-                      const active = manageLevel === lv;
-                      const col =
-                        lv === 'admin' ? '#fbbf24' : lv === 'operator' ? '#38bdf8' : '#94a3b8';
-                      return (
-                        <Pressable
-                          key={lv}
-                          onPress={() => applyManagePreset(lv)}
-                          style={[
-                            styles.manageRankChip,
-                            active && { backgroundColor: `${col}33`, borderColor: col },
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.manageRankChipText,
-                              active && { color: col },
-                            ]}
-                          >
-                            {t(`manage.level.${lv}`)}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                    {manageLevel === 'custom' ? (
-                      <View
-                        style={[
-                          styles.manageRankChip,
-                          { backgroundColor: 'rgba(251,191,36,0.2)', borderColor: '#fbbf24' },
-                        ]}
-                      >
-                        <Text style={[styles.manageRankChipText, { color: '#fbbf24' }]}>
-                          {t('manage.level.custom')}
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-                  <Text style={styles.manageOwnerNote}>{t('manage.levelHelp')}</Text>
-
-                  <View style={styles.managePermToolbar}>
-                    <Text style={styles.manageFieldLabel}>
-                      {t('manage.permissions')} · {managePerms.length}/
-                      {managePermKeysAllowed.length}
-                    </Text>
-                    <View style={{ flexDirection: 'row', gap: 8 }}>
-                      <Pressable
-                        onPress={() => setAllManagePerms(true)}
-                        style={styles.managePermQuickBtn}
-                      >
-                        <Text style={styles.managePermQuickText}>{t('manage.permAll')}</Text>
-                      </Pressable>
-                      <Pressable
-                        onPress={() => setAllManagePerms(false)}
-                        style={styles.managePermQuickBtn}
-                      >
-                        <Text style={styles.managePermQuickText}>{t('manage.permNone')}</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                  {managePermGroups.map((grp) => (
-                    <View key={grp.id} style={styles.managePermGroup}>
-                      <Text style={styles.managePermGroupTitle}>
-                        {grp.id === 'ownerOnly'
-                          ? t('manage.group.ownerOnly')
-                          : t(`manage.group.${grp.id}`)}
-                      </Text>
-                      <View style={styles.managePermGrid}>
-                        {grp.keys.map((key) => {
-                          const on = managePerms.includes(key);
-                          return (
-                            <Pressable
-                              key={key}
-                              onPress={() => toggleManagePerm(key)}
-                              style={[styles.managePermRow, on && styles.managePermRowOn]}
-                            >
-                              <Ionicons
-                                name={on ? 'checkbox' : 'square-outline'}
-                                size={20}
-                                color={on ? '#fbbf24' : '#64748b'}
-                              />
-                              <View style={{ flex: 1, minWidth: 0 }}>
-                                <Text
-                                  style={[
-                                    styles.managePermTitle,
-                                    on && { color: '#f8fafc' },
-                                  ]}
-                                >
-                                  {t(`manage.perm.${key}`)}
-                                </Text>
-                                <Text style={styles.managePermDesc} numberOfLines={2}>
-                                  {t(`manage.perm.${key}.desc`)}
-                                </Text>
-                              </View>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-                    </View>
-                  ))}
-
-                  <TouchableOpacity
-                    style={[styles.manageCreateBtn, manageCreating && { opacity: 0.6 }]}
-                    onPress={createAppLoginUser}
-                    disabled={manageCreating}
-                    activeOpacity={0.85}
-                  >
-                    {manageCreating ? (
-                      <ActivityIndicator color="#000" />
-                    ) : (
-                      <>
-                        <Ionicons name="person-add" size={18} color="#000" />
-                        <Text style={styles.manageCreateBtnText}>
-                          {t('manage.createBtn')}
-                        </Text>
-                      </>
-                    )}
-                  </TouchableOpacity>
-                </View>
-
+                {/* Staff list first — edit rights one-by-one */}
                 <View style={styles.manageStaffHeader}>
-                  <Text style={styles.manageCardTitle}>{t('manage.appUsers')}</Text>
+                  <Text style={styles.manageCardTitle}>
+                    {t('manage.appUsers')}
+                    {appUsersList.length
+                      ? ` · ${appUsersList.length}`
+                      : ''}
+                  </Text>
                   <TouchableOpacity
                     onPress={() => fetchAppUsers({ silent: false })}
                     hitSlop={HIT_SLOP_SM}
@@ -8846,6 +8830,7 @@ function AppInner() {
                     <Ionicons name="refresh" size={18} color="#94a3b8" />
                   </TouchableOpacity>
                 </View>
+                <Text style={styles.manageOwnerNote}>{t('manage.editHelp')}</Text>
 
                 {appUsersLoading && appUsersList.length === 0 ? (
                   <ActivityIndicator color="#fbbf24" style={{ marginVertical: 24 }} />
@@ -8859,82 +8844,335 @@ function AppInner() {
                         ? '#fbbf24'
                         : u.level === 'operator'
                           ? '#38bdf8'
-                          : '#94a3b8';
+                          : u.level === 'custom'
+                            ? '#a78bfa'
+                            : '#94a3b8';
+                    const perms =
+                      Array.isArray(u.permissions) && u.permissions.length
+                        ? u.permissions
+                        : APP_LEVEL_PRESETS[u.level] || APP_LEVEL_PRESETS.viewer;
+                    const chips = perms.filter((p) => p !== 'security');
                     return (
                       <View
                         key={u.id}
-                        style={[styles.manageUserRow, !u.active && { opacity: 0.45 }]}
+                        style={[
+                          styles.manageUserCard,
+                          !u.active && { opacity: 0.5 },
+                        ]}
                       >
-                        <View style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={styles.manageUserName} numberOfLines={1}>
-                            {u.username}
-                          </Text>
-                          <Text style={styles.manageUserMeta} numberOfLines={2}>
-                            <Text style={{ color: col, fontWeight: '800' }}>{u.role}</Text>
-                            {' · '}
-                            <Text style={{ color: lvCol }}>{u.level}</Text>
-                            {Array.isArray(u.permissions)
-                              ? ` · ${u.permissions.length} ${t('manage.permCount')}`
-                              : ''}
-                            {!u.active ? ` · ${t('manage.disabled')}` : ''}
-                          </Text>
+                        <View style={styles.manageUserCardTop}>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={styles.manageUserName} numberOfLines={1}>
+                              {u.username}
+                              {!u.active ? ` · ${t('manage.disabled')}` : ''}
+                            </Text>
+                            <Text style={styles.manageUserMeta} numberOfLines={1}>
+                              <Text style={{ color: col, fontWeight: '800' }}>
+                                {u.role}
+                              </Text>
+                              {' · '}
+                              <Text style={{ color: lvCol }}>
+                                {t(`manage.level.${u.level || 'custom'}`)}
+                              </Text>
+                              {` · ${chips.length} ${t('manage.permCount')}`}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={styles.manageChipWrap}>
+                          {chips.length === 0 ? (
+                            <Text style={styles.manageChipEmpty}>
+                              {t('manage.noPermsYet')}
+                            </Text>
+                          ) : (
+                            chips.map((p) => (
+                              <View key={`${u.id}-${p}`} style={styles.manageChip}>
+                                <Text style={styles.manageChipText} numberOfLines={1}>
+                                  {t(`manage.perm.${p}`)}
+                                </Text>
+                              </View>
+                            ))
+                          )}
                         </View>
                         <TouchableOpacity
-                          style={styles.manageMiniBtn}
-                          onPress={() => {
-                            setManageEditPwdOnly(false);
-                            setManageEditUser(u);
-                            setManageEditPerms(
-                              Array.isArray(u.permissions) && u.permissions.length
-                                ? [...u.permissions]
-                                : [
-                                    ...(APP_LEVEL_PRESETS[u.level] ||
-                                      APP_LEVEL_PRESETS.viewer),
-                                  ]
-                            );
-                            setManageEditPassword('');
-                          }}
+                          style={styles.manageEditRightsBtn}
+                          onPress={() => openManageEditRights(u)}
+                          activeOpacity={0.85}
                         >
-                          <Ionicons name="shield" size={16} color="#fbbf24" />
+                          <Ionicons name="options-outline" size={18} color="#000" />
+                          <Text style={styles.manageEditRightsBtnText}>
+                            {t('manage.editRights')}
+                          </Text>
                         </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.manageMiniBtn}
-                          onPress={() => {
-                            setManageEditPwdOnly(true);
-                            setManageEditUser(u);
-                            setManageEditPerms([]);
-                            setManageEditPassword('');
-                          }}
-                        >
-                          <Ionicons name="key" size={16} color="#38bdf8" />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.manageMiniBtn}
-                          onPress={() =>
-                            updateAppLoginUser(u, { active: !u.active })
-                          }
-                        >
-                          <Ionicons
-                            name={u.active ? 'pause' : 'play'}
-                            size={16}
-                            color={u.active ? '#f87171' : '#34d399'}
-                          />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.manageMiniBtn}
-                          onPress={() => deleteAppLoginUser(u)}
-                        >
-                          <Ionicons name="trash" size={16} color="#f87171" />
-                        </TouchableOpacity>
+                        <View style={styles.manageUserActions}>
+                          <TouchableOpacity
+                            style={styles.manageActionChip}
+                            onPress={() => {
+                              setManageEditPwdOnly(true);
+                              setManageEditUser(u);
+                              setManageEditPerms([]);
+                              setManageEditPassword('');
+                            }}
+                          >
+                            <Ionicons name="key-outline" size={15} color="#38bdf8" />
+                            <Text style={styles.manageActionChipText}>
+                              {t('manage.resetPassword')}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.manageActionChip}
+                            onPress={() =>
+                              updateAppLoginUser(u, { active: !u.active })
+                            }
+                          >
+                            <Ionicons
+                              name={u.active ? 'pause-outline' : 'play-outline'}
+                              size={15}
+                              color={u.active ? '#f87171' : '#34d399'}
+                            />
+                            <Text style={styles.manageActionChipText}>
+                              {u.active
+                                ? t('manage.disable')
+                                : t('manage.enable')}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.manageActionChip}
+                            onPress={() => deleteAppLoginUser(u)}
+                          >
+                            <Ionicons name="trash-outline" size={15} color="#f87171" />
+                            <Text
+                              style={[
+                                styles.manageActionChipText,
+                                { color: '#f87171' },
+                              ]}
+                            >
+                              {t('manage.delete')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                     );
                   })
                 )}
 
+                {/* Create account — collapsible */}
+                <Pressable
+                  onPress={() => setManageShowCreate((v) => !v)}
+                  style={styles.manageCreateToggle}
+                >
+                  <Ionicons
+                    name={manageShowCreate ? 'chevron-up' : 'person-add-outline'}
+                    size={18}
+                    color="#fbbf24"
+                  />
+                  <Text style={styles.manageCreateToggleText}>
+                    {manageShowCreate
+                      ? t('manage.hideCreate')
+                      : t('manage.createApp')}
+                  </Text>
+                </Pressable>
+
+                {manageShowCreate ? (
+                  <View style={styles.manageCard}>
+                    <Text style={styles.manageCardTitle}>{t('manage.createApp')}</Text>
+                    <Text style={styles.manageOwnerNote}>{t('manage.levelHelp')}</Text>
+                    <Text style={styles.manageFieldLabel}>{t('manage.username')}</Text>
+                    <TextInput
+                      style={styles.manageInput}
+                      placeholder={t('login.username')}
+                      {...darkInputProps}
+                      value={manageUsername}
+                      onChangeText={setManageUsername}
+                      autoCapitalize="none"
+                      autoComplete="off"
+                    />
+                    <Text style={styles.manageFieldLabel}>{t('manage.password')}</Text>
+                    <TextInput
+                      style={styles.manageInput}
+                      placeholder={t('manage.passwordHint')}
+                      {...darkInputProps}
+                      secureTextEntry
+                      value={managePassword}
+                      onChangeText={setManagePassword}
+                      autoCapitalize="none"
+                    />
+                    <Text style={styles.manageFieldLabel}>{t('manage.presets')}</Text>
+                    <View style={styles.manageRankWrap}>
+                      {APP_LEVELS.map((lv) => {
+                        const active = manageLevel === lv;
+                        const col =
+                          lv === 'admin'
+                            ? '#fbbf24'
+                            : lv === 'operator'
+                              ? '#38bdf8'
+                              : '#94a3b8';
+                        return (
+                          <Pressable
+                            key={lv}
+                            onPress={() => applyManagePreset(lv)}
+                            style={[
+                              styles.manageRankChip,
+                              active && {
+                                backgroundColor: `${col}33`,
+                                borderColor: col,
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.manageRankChipText,
+                                active && { color: col },
+                              ]}
+                            >
+                              {t(`manage.level.${lv}`)}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                      {manageLevel === 'custom' ? (
+                        <View
+                          style={[
+                            styles.manageRankChip,
+                            {
+                              backgroundColor: 'rgba(167,139,250,0.2)',
+                              borderColor: '#a78bfa',
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.manageRankChipText,
+                              { color: '#a78bfa' },
+                            ]}
+                          >
+                            {t('manage.level.custom')}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+
+                    <View style={styles.managePermToolbar}>
+                      <Text style={styles.manageFieldLabel}>
+                        {t('manage.permissions')} · {managePerms.length}/
+                        {managePermKeysAllowed.length}
+                      </Text>
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <Pressable
+                          onPress={() => setAllManagePerms(true)}
+                          style={styles.managePermQuickBtn}
+                        >
+                          <Text style={styles.managePermQuickText}>
+                            {t('manage.permAll')}
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => setAllManagePerms(false)}
+                          style={styles.managePermQuickBtn}
+                        >
+                          <Text style={styles.managePermQuickText}>
+                            {t('manage.permNone')}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+
+                    {managePermGroups.map((grp) => {
+                      const gKeys = (grp.keys || []).filter((k) =>
+                        managePermKeysAllowed.includes(k)
+                      );
+                      if (!gKeys.length) return null;
+                      const onCount = gKeys.filter((k) =>
+                        managePerms.includes(k)
+                      ).length;
+                      const allOn = onCount === gKeys.length;
+                      return (
+                        <View key={grp.id} style={styles.managePermGroup}>
+                          <View style={styles.manageGroupHeader}>
+                            <Text style={styles.managePermGroupTitle}>
+                              {grp.id === 'ownerOnly'
+                                ? t('manage.group.ownerOnly')
+                                : t(`manage.group.${grp.id}`)}
+                              <Text style={styles.manageGroupCount}>
+                                {' '}
+                                · {onCount}/{gKeys.length}
+                              </Text>
+                            </Text>
+                            <Pressable
+                              onPress={() => toggleManageGroup(gKeys, !allOn)}
+                              style={styles.manageGroupToggle}
+                            >
+                              <Text style={styles.manageGroupToggleText}>
+                                {allOn
+                                  ? t('manage.groupOff')
+                                  : t('manage.groupOn')}
+                              </Text>
+                            </Pressable>
+                          </View>
+                          {gKeys.map((key) => {
+                            const on = managePerms.includes(key);
+                            return (
+                              <Pressable
+                                key={key}
+                                onPress={() => toggleManagePerm(key)}
+                                style={[
+                                  styles.manageSwitchRow,
+                                  on && styles.manageSwitchRowOn,
+                                ]}
+                              >
+                                <View style={{ flex: 1, minWidth: 0 }}>
+                                  <Text
+                                    style={[
+                                      styles.managePermTitle,
+                                      on && { color: '#f8fafc' },
+                                    ]}
+                                  >
+                                    {t(`manage.perm.${key}`)}
+                                  </Text>
+                                  <Text
+                                    style={styles.managePermDesc}
+                                    numberOfLines={2}
+                                  >
+                                    {t(`manage.perm.${key}.desc`)}
+                                  </Text>
+                                </View>
+                                <Ionicons
+                                  name={on ? 'toggle' : 'toggle-outline'}
+                                  size={34}
+                                  color={on ? '#fbbf24' : '#475569'}
+                                />
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      );
+                    })}
+
+                    <TouchableOpacity
+                      style={[
+                        styles.manageCreateBtn,
+                        manageCreating && { opacity: 0.6 },
+                      ]}
+                      onPress={createAppLoginUser}
+                      disabled={manageCreating}
+                      activeOpacity={0.85}
+                    >
+                      {manageCreating ? (
+                        <ActivityIndicator color="#000" />
+                      ) : (
+                        <>
+                          <Ionicons name="person-add" size={18} color="#000" />
+                          <Text style={styles.manageCreateBtnText}>
+                            {t('manage.createBtn')}
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
               </ScrollView>
             )}
 
-            {/* Edit permissions / password — Modal so Save is always visible */}
+            {/* Edit rights / password modal — full per-right toggles */}
             <Modal
               animationType="slide"
               transparent
@@ -8968,7 +9206,10 @@ function AppInner() {
                 <View
                   style={[
                     styles.sheet,
-                    { paddingBottom: Math.max(insets.bottom, 16), maxHeight: '88%' },
+                    {
+                      paddingBottom: Math.max(insets.bottom, 16),
+                      maxHeight: '92%',
+                    },
                   ]}
                 >
                   <View style={styles.sheetHandle} />
@@ -8977,10 +9218,13 @@ function AppInner() {
                       <Text style={styles.terminalTitle}>
                         {manageEditPwdOnly
                           ? t('manage.resetPassword')
-                          : t('manage.editPerms')}
+                          : t('manage.editRights')}
                       </Text>
                       <Text style={styles.terminalSub} numberOfLines={1}>
                         {manageEditUser?.username} · {manageEditUser?.role}
+                        {!manageEditPwdOnly
+                          ? ` · ${manageEditPerms.filter((p) => p !== 'security').length} ${t('manage.permCount')}`
+                          : ''}
                       </Text>
                     </View>
                     <TouchableOpacity
@@ -8999,17 +9243,26 @@ function AppInner() {
 
                   <ScrollView
                     keyboardShouldPersistTaps="handled"
-                    contentContainerStyle={{ padding: 14, paddingBottom: 20 }}
+                    contentContainerStyle={{ padding: 14, paddingBottom: 28 }}
                   >
                     {!manageEditPwdOnly ? (
                       <>
-                        <Text style={styles.manageFieldLabel}>{t('manage.presets')}</Text>
+                        <Text style={styles.manageOwnerNote}>
+                          {t('manage.editHelp')}
+                        </Text>
+                        <Text style={styles.manageFieldLabel}>
+                          {t('manage.presets')}
+                        </Text>
                         <View style={styles.manageRankWrap}>
                           {APP_LEVELS.map((lv) => (
                             <Pressable
                               key={`ed-${lv}`}
                               onPress={() =>
-                                setManageEditPerms([...(APP_LEVEL_PRESETS[lv] || [])])
+                                setManageEditPerms(
+                                  normalizeManagePerms([
+                                    ...(APP_LEVEL_PRESETS[lv] || []),
+                                  ])
+                                )
                               }
                               style={styles.manageRankChip}
                             >
@@ -9019,7 +9272,9 @@ function AppInner() {
                             </Pressable>
                           ))}
                           <Pressable
-                            onPress={() => setManageEditPerms([...managePermKeysAllowed])}
+                            onPress={() =>
+                              setManageEditPerms([...managePermKeysAllowed])
+                            }
                             style={styles.manageRankChip}
                           >
                             <Text style={styles.manageRankChipText}>
@@ -9035,45 +9290,53 @@ function AppInner() {
                             </Text>
                           </Pressable>
                         </View>
-                        <Text style={styles.manageFieldLabel}>
-                          {t('manage.permissions')} · {manageEditPerms.length}/
-                          {managePermKeysAllowed.length}
-                        </Text>
-                        {managePermGroups.map((grp) => (
-                          <View key={`edg-${grp.id}`} style={styles.managePermGroup}>
-                            <Text style={styles.managePermGroupTitle}>
-                              {grp.id === 'ownerOnly'
-                                ? t('manage.group.ownerOnly')
-                                : t(`manage.group.${grp.id}`)}
-                            </Text>
-                            <View style={styles.managePermGrid}>
-                              {grp.keys.map((key) => {
+
+                        {managePermGroups.map((grp) => {
+                          const gKeys = (grp.keys || []).filter((k) =>
+                            managePermKeysAllowed.includes(k)
+                          );
+                          if (!gKeys.length) return null;
+                          const onCount = gKeys.filter((k) =>
+                            manageEditPerms.includes(k)
+                          ).length;
+                          const allOn = onCount === gKeys.length;
+                          return (
+                            <View key={`edg-${grp.id}`} style={styles.managePermGroup}>
+                              <View style={styles.manageGroupHeader}>
+                                <Text style={styles.managePermGroupTitle}>
+                                  {grp.id === 'ownerOnly'
+                                    ? t('manage.group.ownerOnly')
+                                    : t(`manage.group.${grp.id}`)}
+                                  <Text style={styles.manageGroupCount}>
+                                    {' '}
+                                    · {onCount}/{gKeys.length}
+                                  </Text>
+                                </Text>
+                                <Pressable
+                                  onPress={() =>
+                                    toggleManageEditGroup(gKeys, !allOn)
+                                  }
+                                  style={styles.manageGroupToggle}
+                                >
+                                  <Text style={styles.manageGroupToggleText}>
+                                    {allOn
+                                      ? t('manage.groupOff')
+                                      : t('manage.groupOn')}
+                                  </Text>
+                                </Pressable>
+                              </View>
+                              {gKeys.map((key) => {
                                 const on = manageEditPerms.includes(key);
                                 return (
                                   <Pressable
                                     key={`edp-${key}`}
-                                    onPress={() => {
-                                      if (key === 'security' && !canGrantSecurity) return;
-                                      setManageEditPerms((prev) => {
-                                        const s = new Set(prev);
-                                        if (s.has(key)) s.delete(key);
-                                        else s.add(key);
-                                        return managePermKeysAllowed.filter((k) =>
-                                          s.has(k)
-                                        );
-                                      });
-                                    }}
+                                    onPress={() => toggleManageEditPerm(key)}
                                     style={[
-                                      styles.managePermRow,
-                                      on && styles.managePermRowOn,
+                                      styles.manageSwitchRow,
+                                      on && styles.manageSwitchRowOn,
                                     ]}
                                   >
-                                    <Ionicons
-                                      name={on ? 'checkbox' : 'square-outline'}
-                                      size={20}
-                                      color={on ? '#fbbf24' : '#64748b'}
-                                    />
-                                    <View style={{ flex: 1 }}>
+                                    <View style={{ flex: 1, minWidth: 0 }}>
                                       <Text
                                         style={[
                                           styles.managePermTitle,
@@ -9082,16 +9345,24 @@ function AppInner() {
                                       >
                                         {t(`manage.perm.${key}`)}
                                       </Text>
-                                      <Text style={styles.managePermDesc} numberOfLines={2}>
+                                      <Text
+                                        style={styles.managePermDesc}
+                                        numberOfLines={2}
+                                      >
                                         {t(`manage.perm.${key}.desc`)}
                                       </Text>
                                     </View>
+                                    <Ionicons
+                                      name={on ? 'toggle' : 'toggle-outline'}
+                                      size={34}
+                                      color={on ? '#fbbf24' : '#475569'}
+                                    />
                                   </Pressable>
                                 );
                               })}
                             </View>
-                          </View>
-                        ))}
+                          );
+                        })}
                       </>
                     ) : null}
 
@@ -9122,7 +9393,9 @@ function AppInner() {
                       {manageEditSaving ? (
                         <ActivityIndicator color="#000" />
                       ) : (
-                        <Text style={styles.manageCreateBtnText}>{t('common.save')}</Text>
+                        <Text style={styles.manageCreateBtnText}>
+                          {t('common.save')}
+                        </Text>
                       )}
                     </TouchableOpacity>
                   </ScrollView>
@@ -12178,18 +12451,177 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
 
+  manageHero: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    backgroundColor: 'rgba(251,191,36,0.06)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(251,191,36,0.2)',
+  },
+  manageHeroTitle: {
+    color: '#f8fafc',
+    fontSize: 17,
+    fontWeight: '800',
+    marginTop: 6,
+  },
+  manageHeroSub: {
+    color: '#94a3b8',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 17,
+    paddingHorizontal: 8,
+  },
   manageStationLock: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1f2937',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 10,
+    borderRadius: 10,
+    backgroundColor: 'rgba(15,23,42,0.7)',
     flexWrap: 'wrap',
+    alignSelf: 'stretch',
   },
   manageStationLockText: { fontSize: 14, fontWeight: '900', letterSpacing: 0.4 },
-  manageStationLockHint: { color: '#64748b', fontSize: 11, flex: 1, minWidth: 120 },
+  manageStationLockHint: { color: '#64748b', fontSize: 11, flex: 1, minWidth: 100 },
+  manageUserCard: {
+    backgroundColor: 'rgba(15,23,42,0.95)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    marginBottom: 12,
+  },
+  manageUserCardTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+  },
+  manageChipWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 10,
+  },
+  manageChip: {
+    backgroundColor: 'rgba(251,191,36,0.12)',
+    borderColor: 'rgba(251,191,36,0.35)',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    maxWidth: '100%',
+  },
+  manageChipText: {
+    color: '#fbbf24',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  manageChipEmpty: {
+    color: '#64748b',
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  manageEditRightsBtn: {
+    backgroundColor: '#fbbf24',
+    borderRadius: 12,
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  manageEditRightsBtnText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  manageUserActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  manageActionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: 'rgba(15,23,42,0.8)',
+  },
+  manageActionChipText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  manageCreateToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    marginTop: 8,
+    marginBottom: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(251,191,36,0.35)',
+    borderStyle: 'dashed',
+  },
+  manageCreateToggleText: {
+    color: '#fbbf24',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  manageGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    gap: 8,
+  },
+  manageGroupCount: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  manageGroupToggle: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: 'rgba(56,189,248,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(56,189,248,0.35)',
+  },
+  manageGroupToggleText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  manageSwitchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    marginBottom: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: 'rgba(15,23,42,0.85)',
+  },
+  manageSwitchRowOn: {
+    borderColor: 'rgba(251,191,36,0.45)',
+    backgroundColor: 'rgba(251,191,36,0.08)',
+  },
   secHero: {
     alignItems: 'center',
     paddingVertical: 16,
