@@ -297,6 +297,12 @@ export async function cacheSet(kind, id, data, meta = null) {
   }
   const k = fullKey(kind, id || '');
   const { payload, metaOut } = preparePayload(kind, data, meta);
+  // L1 keeps the full users array for instant tab paint; L2 disk stays compact.
+  // Previously mem held the truncated slice → switching back to RADIO1 lost rows.
+  const memData =
+    kind === 'users' && Array.isArray(data)
+      ? data
+      : payload;
 
   // Defense-in-depth: refuse to persist anything that looks like a secret
   try {
@@ -312,7 +318,7 @@ export async function cacheSet(kind, id, data, meta = null) {
   const now = Date.now();
   const entry = {
     ts: now,
-    data: payload,
+    data: memData,
     meta: metaOut,
     lastAccess: now,
   };
@@ -322,9 +328,11 @@ export async function cacheSet(kind, id, data, meta = null) {
   if (prev && prev.data !== undefined) {
     try {
       let same = false;
-      if (Array.isArray(payload) && Array.isArray(prev.data)) {
+      // Compare against L1 shape (users keep full array in mem)
+      const compareArr = Array.isArray(memData) ? memData : payload;
+      if (Array.isArray(compareArr) && Array.isArray(prev.data)) {
         const a = prev.data;
-        const b = payload;
+        const b = compareArr;
         if (a.length === b.length) {
           if (a.length === 0) {
             same = true;

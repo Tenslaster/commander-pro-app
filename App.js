@@ -156,7 +156,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.7';
+const APP_VERSION = '1.4.8';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -536,6 +536,22 @@ const STATION_IDS = [
   'RADIO9',
   'RADIO10',
 ];
+
+/** Normalize API / cache station strings to RADIO1…RADIO10 (case-safe). */
+function normalizeStationId(value) {
+  const u = String(value || '')
+    .trim()
+    .toUpperCase();
+  if (STATION_IDS.includes(u)) return u;
+  // Tolerate "R1" / "radio 1" style slips from older bridges
+  const m = u.match(/^R(?:ADIO)?[\s_-]*(10|[1-9])$/);
+  if (m) {
+    const id = `RADIO${m[1]}`;
+    return STATION_IDS.includes(id) ? id : '';
+  }
+  return '';
+}
+
 /** Fallback stream paths (API provides full URLs when online) */
 const STATION_STREAM_MOUNT = {
   RADIO1: '/stream',
@@ -553,7 +569,7 @@ const STREAM_PUBLIC_BASE_FALLBACK = 'https://crew.kingdom.forum';
 
 /** Build a stable public Icecast URL for a station (Android + iOS). */
 function resolveStationStreamUrl(station, streamsMap) {
-  const st = STATION_IDS.includes(station) ? station : 'RADIO1';
+  const st = normalizeStationId(station) || 'RADIO1';
   const info = (streamsMap && streamsMap[st]) || {};
   let url = String(info.stream_url || '').trim();
   if (!url) {
@@ -823,8 +839,11 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
   }
 
   const methodU = String(method || 'GET').toUpperCase();
+  // Never share in-flight GETs that carry an AbortSignal. Users/search/etc abort
+  // the previous call then immediately re-request the same path (esp. RADIO1).
+  // Reusing the aborted promise made the new call "succeed" as AbortError → empty list.
   const dedupeKey =
-    methodU === 'GET' && body === undefined
+    methodU === 'GET' && body === undefined && !signal
       ? `${path}\0${token || ''}`
       : null;
   if (dedupeKey && _inflightGet.has(dedupeKey)) {
@@ -2284,6 +2303,7 @@ function AppInner() {
   const [usersStation, setUsersStation] = useState('RADIO1');
   const [usersList, setUsersList] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState(null);
   const [usersQuery, setUsersQuery] = useState('');
   const [usersFilter, setUsersFilter] = useState('all');
   const [usersSearchHits, setUsersSearchHits] = useState(null);
@@ -2351,6 +2371,8 @@ function AppInner() {
   const usersSearchAbortRef = useRef(null);
   const usersSearchGenRef = useRef(0);
   const usersLoadedStationRef = useRef('');
+  /** Latest Users-tab station (avoid stale closure after rapid R1↔R10 switches). */
+  const usersStationRef = useRef('RADIO1');
 
   const flatListRef = useRef(null);
   /** Terminal autoscroll only when user is near bottom (prevents scroll glitch). */
@@ -2438,6 +2460,10 @@ function AppInner() {
   useEffect(() => {
     userRoleRef.current = userRole;
   }, [userRole]);
+
+  useEffect(() => {
+    usersStationRef.current = usersStation;
+  }, [usersStation]);
 
   useEffect(() => {
     appPermissionsRef.current = Array.isArray(appPermissions)
@@ -2923,6 +2949,8 @@ function AppInner() {
     setUsersSearchHits(null);
     setUsersSearchActiveQuery('');
     setUsersSearching(false);
+    setUsersError(null);
+    setUsersLoading(false);
     setSelectedStationUser(null);
     setBotConfigModal(null);
     setUserEditSaving(false);
@@ -4692,7 +4720,7 @@ function AppInner() {
   const effectiveUsersStation = useMemo(() => {
     const role = userRole || '';
     if (role && role !== 'OWNER' && STATION_IDS.includes(role)) return role;
-    return usersStation;
+    return normalizeStationId(usersStation) || 'RADIO1';
   }, [userRole, usersStation]);
 
   /** Active station for Playlist tab — same isolation as Users. */
@@ -5022,25 +5050,38 @@ function AppInner() {
   const switchUsersStation = useCallback(
     (st) => {
       if (!isOwner) return;
-      if (!STATION_IDS.includes(st) || st === usersStation) return;
+      const next = normalizeStationId(st);
+      if (!next || next === usersStation) return;
       setSelectedStationUser(null);
-      setUsersList([]);
       setUsersSearchHits(null);
       setUsersSearchActiveQuery('');
-      usersLoadedStationRef.current = '';
       setUsersQuery('');
       setUsersFilter('all');
-      setUsersStation(st);
+      setUsersError(null);
+      setUsersSearchBarKey((k) => k + 1);
+      // Instant paint from cache (same pattern as stats station switch)
+      const peek = cachePeek('users', next);
+      if (cacheUsable(peek) && Array.isArray(peek.data) && peek.data.length) {
+        setUsersList(peek.data);
+        usersLoadedStationRef.current = next;
+      } else {
+        setUsersList([]);
+        usersLoadedStationRef.current = '';
+      }
+      usersStationRef.current = next;
+      setUsersStation(next);
     },
     [isOwner, usersStation]
   );
 
   const normalizeUserRow = useCallback((u, station) => {
     const rank = (u.rank || 'guest').toLowerCase();
+    const st =
+      normalizeStationId(u?.station) || normalizeStationId(station) || station || '';
     return {
       ...u,
-      station: u.station || station,
-      id: u.id || `${station}:${u.username}`,
+      station: st,
+      id: u.id || `${st}:${u.username}`,
       rank,
       rank_level:
         typeof u.rank_level === 'number' ? u.rank_level : RANK_LEVELS[rank] ?? 0,
@@ -5053,13 +5094,14 @@ function AppInner() {
       const token = authTokenRef.current;
       if (!token) return;
       const role = userRoleRef.current || '';
-      const station =
+      const stationRaw =
         role === 'OWNER'
-          ? usersStation
+          ? usersStationRef.current
           : STATION_IDS.includes(role)
             ? role
-            : usersStation;
-      if (!station || !STATION_IDS.includes(station)) return;
+            : usersStationRef.current;
+      const station = normalizeStationId(stationRaw);
+      if (!station) return;
 
       try {
         usersAbortRef.current?.abort?.();
@@ -5070,10 +5112,16 @@ function AppInner() {
       usersAbortRef.current = ac;
       const gen = ++usersFetchGenRef.current;
 
+      // Station changed and no usable cache for target → clear stale rows
       if (usersLoadedStationRef.current && usersLoadedStationRef.current !== station) {
-        setUsersList([]);
-        setUsersSearchHits(null);
+        const peek = cachePeek('users', station);
+        if (!(cacheUsable(peek) && Array.isArray(peek.data) && peek.data.length)) {
+          setUsersList([]);
+          setUsersSearchHits(null);
+        }
       }
+
+      if (mountedRef.current) setUsersError(null);
 
       try {
         const cached = await cacheGet('users', station);
@@ -5090,38 +5138,50 @@ function AppInner() {
       } catch {
         /* ignore */
       }
-      if (!silent && mountedRef.current) setUsersLoading(true);
+      if (!silent && mountedRef.current && gen === usersFetchGenRef.current) {
+        setUsersLoading(true);
+      }
       try {
         const data = await apiFetch(
           `/users?station=${encodeURIComponent(station)}&filter=all&limit=${USERS_BROWSE_LIMIT}`,
           { token, signal: ac?.signal, timeoutMs: 45000 }
         );
         if (!mountedRef.current || gen !== usersFetchGenRef.current) return;
-        const returned = data?.station || station;
+        const returned = normalizeStationId(data?.station) || station;
         const expected =
           role === 'OWNER'
-            ? usersStation
+            ? normalizeStationId(usersStationRef.current)
             : STATION_IDS.includes(role)
               ? role
-              : usersStation;
-        if (returned !== expected) return;
+              : normalizeStationId(usersStationRef.current);
+        // Drop late responses after OWNER switches R1…R10 mid-flight
+        if (expected && returned !== expected) return;
 
         const list = Array.isArray(data?.users) ? data.users : [];
         const rows = list.map((u) => normalizeUserRow(u, returned));
         setUsersList(rows);
         usersLoadedStationRef.current = returned;
+        setUsersError(null);
         cacheSet('users', returned, rows).catch(() => {});
-        if (role !== 'OWNER' && returned) setUsersStation(returned);
+        if (role !== 'OWNER' && returned) {
+          usersStationRef.current = returned;
+          setUsersStation(returned);
+        }
       } catch (error) {
         if (error?.name === 'AbortError' || error?.code === 'ABORT') return;
         if (error.code === 'UNAUTHORIZED') {
           handleLogout();
           return;
         }
-        if (!silent && appStateRef.current === 'active') {
-          const peek = cachePeek('users', station);
-          if (!cacheUsable(peek)) {
-            Alert.alert('Utilisateurs', error.message || 'Chargement impossible.');
+        if (!mountedRef.current || gen !== usersFetchGenRef.current) return;
+        const peek = cachePeek('users', station);
+        const hasCache =
+          cacheUsable(peek) && Array.isArray(peek?.data) && peek.data.length > 0;
+        if (!hasCache) {
+          setUsersError(error.message || 'Chargement impossible.');
+          // Blocking alert only on explicit pull/refresh (silent background soft-fails)
+          if (!silent && appStateRef.current === 'active') {
+            // Inline empty-state retry is preferred; keep alert for hard failures only
           }
         }
       } finally {
@@ -5130,7 +5190,7 @@ function AppInner() {
         }
       }
     },
-    [usersStation, handleLogout, normalizeUserRow]
+    [handleLogout, normalizeUserRow]
   );
 
   /** Full-database search (room_time + all maps) */
@@ -5148,13 +5208,14 @@ function AppInner() {
         return;
       }
       const role = userRoleRef.current || '';
-      const station =
+      const stationRaw =
         role === 'OWNER'
-          ? usersStation
+          ? usersStationRef.current
           : STATION_IDS.includes(role)
             ? role
-            : usersStation;
-      if (!station || !STATION_IDS.includes(station)) return;
+            : usersStationRef.current;
+      const station = normalizeStationId(stationRaw);
+      if (!station) return;
 
       try {
         usersSearchAbortRef.current?.abort?.();
@@ -5171,8 +5232,9 @@ function AppInner() {
           { token, signal: ac?.signal, timeoutMs: 45000 }
         );
         if (!mountedRef.current || gen !== usersSearchGenRef.current) return;
-        const returned = data?.station || station;
-        if (role === 'OWNER' && returned !== usersStation) return;
+        const returned = normalizeStationId(data?.station) || station;
+        const expected = normalizeStationId(usersStationRef.current) || station;
+        if (role === 'OWNER' && returned !== expected) return;
         const list = Array.isArray(data?.users) ? data.users : [];
         setUsersSearchHits(list.map((u) => normalizeUserRow(u, returned)));
         setUsersSearchActiveQuery(q);
@@ -5188,25 +5250,28 @@ function AppInner() {
         }
       }
     },
-    [usersStation, handleLogout, normalizeUserRow]
+    [handleLogout, normalizeUserRow]
   );
 
   const filteredUsers = useMemo(() => {
     const q = usersQuery.trim().toLowerCase().replace(/^@/, '');
+    const stationKey = normalizeStationId(effectiveUsersStation) || effectiveUsersStation;
     let list;
     if (q && usersSearchHits && usersSearchActiveQuery === q) {
       list = usersSearchHits;
     } else if (q) {
       list = usersList.filter((u) => {
-        if (u.station && u.station !== effectiveUsersStation) return false;
+        const us = normalizeStationId(u.station);
+        if (us && us !== stationKey) return false;
         return String(u.username || '')
           .toLowerCase()
           .includes(q);
       });
     } else {
-      list = usersList.filter(
-        (u) => !u.station || u.station === effectiveUsersStation
-      );
+      list = usersList.filter((u) => {
+        const us = normalizeStationId(u.station);
+        return !us || us === stationKey;
+      });
     }
     const f = (usersFilter || 'all').toLowerCase();
     if (f === 'banned' || f === 'ban') list = list.filter((u) => !!u.banned);
@@ -5261,7 +5326,10 @@ function AppInner() {
   const openStationUser = useCallback(
     (u) => {
       if (!u) return;
-      const station = u.station || effectiveUsersStation;
+      const station =
+        normalizeStationId(u.station) ||
+        normalizeStationId(effectiveUsersStation) ||
+        '';
       if (!station) {
         Alert.alert('Utilisateurs', 'Station manquante — impossible d’ouvrir ce profil.');
         return;
@@ -5584,7 +5652,7 @@ function AppInner() {
       return;
     }
     const username = selectedStationUser.username;
-    const station = selectedStationUser.station;
+    const station = normalizeStationId(selectedStationUser.station);
     const previous = { ...selectedStationUser };
     if (!station || !STATION_IDS.includes(station)) {
       Alert.alert(
@@ -5593,10 +5661,11 @@ function AppInner() {
       );
       return;
     }
-    if (isOwner && station !== usersStation) {
+    const tabStation = normalizeStationId(usersStation) || usersStation;
+    if (isOwner && station !== tabStation) {
       Alert.alert(
         'Mauvaise radio',
-        `Ce profil est ${station}, tu es sur ${usersStation}.\nRien n’a été modifié.`
+        `Ce profil est ${station}, tu es sur ${tabStation}.\nRien n’a été modifié.`
       );
       setSelectedStationUser(null);
       return;
@@ -6987,11 +7056,13 @@ function AppInner() {
     }
   }, [mainTab, activeChat, fetchNotifications, fetchChatChannels]);
 
-  // Users tab: Highrise directory
+  // Users tab: Highrise directory (RADIO1 default is hit hardest — always revalidate)
   useEffect(() => {
     if (mainTab !== 'users') return undefined;
+    const st = normalizeStationId(usersStation) || usersStation;
     const already =
-      usersLoadedStationRef.current === usersStation && usersList.length > 0;
+      usersLoadedStationRef.current === st && usersList.length > 0;
+    // silent when we already painted (cache / prior fetch); network still refreshes
     fetchStationUsers({ silent: already });
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -7404,13 +7475,14 @@ function AppInner() {
       } else if (mainTab === 'stats' && canStatsTab) {
         fetchStatus(false);
       } else if (mainTab === 'users' && canUsersTab) {
-        // users list is heavy — only touch cache peek (no force pull)
+        // Soft fill only if we never successfully loaded this station (avoid abort races)
         try {
           const st = effectiveUsersStation;
-          const peek = cachePeek('users', st);
-          if (!cacheUsable(peek)) {
-            // soft background fill without blocking UI
-            fetchStationUsers?.({ silent: true });
+          if (usersLoadedStationRef.current !== st) {
+            const peek = cachePeek('users', st);
+            if (!cacheUsable(peek)) {
+              fetchStationUsers({ silent: true });
+            }
           }
         } catch {
           /* ignore */
@@ -7427,6 +7499,7 @@ function AppInner() {
     fetchStreams,
     fetchStationStats,
     fetchStatus,
+    fetchStationUsers,
   ]);
 
   // Security tab: poll only while visible (smooth + low load)
@@ -9632,12 +9705,21 @@ function AppInner() {
                 inputStyle={styles.usersSearchInput}
               />
               <TouchableOpacity
-                onPress={() => fetchStationUsers({ silent: false })}
+                onPress={() => {
+                  if (usersLoading) return;
+                  fetchStationUsers({ silent: false });
+                }}
                 hitSlop={8}
-                style={{ marginLeft: 6 }}
+                style={styles.usersRefreshBtn}
+                disabled={usersLoading}
                 accessibilityLabel={t('search.refresh')}
+                accessibilityRole="button"
               >
-                <Ionicons name="refresh" size={18} color="#94a3b8" />
+                {usersLoading ? (
+                  <ActivityIndicator size="small" color="#a78bfa" />
+                ) : (
+                  <Ionicons name="refresh" size={18} color="#94a3b8" />
+                )}
               </TouchableOpacity>
             </View>
 
@@ -9658,29 +9740,51 @@ function AppInner() {
               ))}
             </ScrollView>
 
-            <Text style={styles.usersCountLine}>
-              {usersLoading
-                ? t('users.loading')
-                : usersSearching
-                  ? `${t('users.searching')} ${filteredUsers.length} ${t('users.results')}`
-                  : usersQuery.trim()
-                    ? `${filteredUsers.length} ${t('users.results')}`
-                    : usersFilter !== 'all'
-                      ? `${filteredUsers.length} / ${usersList.length} ${t('users.count')}`
-                      : `${usersList.length} ${t('users.count')}`}
-            </Text>
+            <View style={styles.usersCountRow}>
+              <Text style={styles.usersCountLine}>
+                {usersLoading && !usersList.length
+                  ? t('users.loading')
+                  : usersSearching
+                    ? `${t('users.searching')} ${filteredUsers.length} ${t('users.results')}`
+                    : usersQuery.trim()
+                      ? `${filteredUsers.length} ${t('users.results')}`
+                      : usersFilter !== 'all'
+                        ? `${filteredUsers.length} / ${usersList.length} ${t('users.count')}`
+                        : `${usersList.length} ${t('users.count')}`}
+              </Text>
+              {usersLoading && usersList.length > 0 ? (
+                <Text style={styles.usersCountHint}>{t('users.refreshing')}</Text>
+              ) : null}
+            </View>
+
+            {usersError && !usersList.length ? (
+              <View style={styles.usersErrorBanner}>
+                <Ionicons name="warning-outline" size={16} color="#fbbf24" />
+                <Text style={styles.usersErrorText} numberOfLines={2}>
+                  {usersError}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => fetchStationUsers({ silent: false })}
+                  style={styles.usersErrorRetry}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('users.retry')}
+                >
+                  <Text style={styles.usersErrorRetryText}>{t('users.retry')}</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
 
             <FlatList
               style={styles.tabList}
               data={filteredUsers}
               keyExtractor={userKeyExtractor}
-              extraData={`${effectiveUsersStation}-${usersFilter}-${usersSearching ? 1 : 0}`}
+              extraData={`${effectiveUsersStation}-${usersFilter}-${usersSearching ? 1 : 0}-${usersError ? 1 : 0}`}
               {...listPerfProps}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
               refreshControl={
                 <RefreshControl
-                  refreshing={usersLoading}
+                  refreshing={usersLoading && usersList.length > 0}
                   onRefresh={() => fetchStationUsers({ silent: false })}
                   tintColor="#a78bfa"
                   colors={['#a78bfa']}
@@ -9695,9 +9799,16 @@ function AppInner() {
                 <View style={styles.emptyWrap}>
                   {usersLoading || usersSearching ? (
                     <ActivityIndicator color="#a78bfa" style={{ marginBottom: 12 }} />
+                  ) : usersError ? (
+                    <Ionicons
+                      name="cloud-offline-outline"
+                      size={40}
+                      color="#fbbf24"
+                      style={{ marginBottom: 10 }}
+                    />
                   ) : (
                     <Ionicons
-                      name="search-outline"
+                      name="people-outline"
                       size={36}
                       color="#475569"
                       style={{ marginBottom: 10 }}
@@ -9708,15 +9819,28 @@ function AppInner() {
                       ? t('users.loadingList')
                       : usersSearching
                         ? t('users.searchingDb')
-                        : usersQuery.trim()
-                          ? t('users.emptySearch', {
-                              q: usersQuery.trim(),
-                              station: effectiveUsersStation,
-                            })
-                          : usersFilter !== 'all'
-                            ? t('users.emptyFilter', { station: effectiveUsersStation })
-                            : t('users.empty', { station: effectiveUsersStation })}
+                        : usersError
+                          ? t('users.error')
+                          : usersQuery.trim()
+                            ? t('users.emptySearch', {
+                                q: usersQuery.trim(),
+                                station: effectiveUsersStation,
+                              })
+                            : usersFilter !== 'all'
+                              ? t('users.emptyFilter', { station: effectiveUsersStation })
+                              : t('users.empty', { station: effectiveUsersStation })}
                   </Text>
+                  {!usersLoading && !usersSearching && !usersQuery.trim() ? (
+                    <TouchableOpacity
+                      style={styles.usersEmptyRetry}
+                      onPress={() => fetchStationUsers({ silent: false })}
+                      accessibilityRole="button"
+                      accessibilityLabel={t('users.retry')}
+                    >
+                      <Ionicons name="refresh" size={16} color="#e2e8f0" />
+                      <Text style={styles.usersEmptyRetryText}>{t('users.retry')}</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
               }
               renderItem={renderUserItem}
@@ -12638,12 +12762,79 @@ const styles = StyleSheet.create({
   usersSearchClear: { paddingHorizontal: 4, justifyContent: 'center' },
   usersFilterBar: { maxHeight: 48, flexGrow: 0 },
   usersFilterBarInner: { gap: 8, paddingHorizontal: 12, paddingVertical: 8, alignItems: 'center' },
+  usersCountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    marginBottom: 6,
+    gap: 8,
+  },
   usersCountLine: {
     color: '#64748b',
     fontSize: 11,
     fontWeight: '600',
-    paddingHorizontal: 14,
-    marginBottom: 6,
+    flexShrink: 1,
+  },
+  usersCountHint: {
+    color: '#a78bfa',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  usersRefreshBtn: {
+    marginLeft: 6,
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  usersErrorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 12,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(251,191,36,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(251,191,36,0.35)',
+  },
+  usersErrorText: {
+    flex: 1,
+    color: '#fde68a',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  usersErrorRetry: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(167,139,250,0.25)',
+  },
+  usersErrorRetryText: {
+    color: '#e9d5ff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  usersEmptyRetry: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  usersEmptyRetryText: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '700',
   },
 
   manageHero: {
