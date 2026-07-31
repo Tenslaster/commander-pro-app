@@ -91,7 +91,8 @@
         {
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-sqlite"
     ]
   }
 }

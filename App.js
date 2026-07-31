@@ -54,12 +54,14 @@ import {
 } from './notificationBackground';
 import {
   cacheGet,
+  cacheGetUsers,
   cacheSet,
   cacheClearAll,
   cachePeek,
   cacheUsable,
   cacheRemove,
   cacheFlush,
+  cacheInit,
 } from './appCache';
 import {
   createAdaptiveBudget,
@@ -2861,7 +2863,46 @@ function AppInner() {
     }
   }, []);
 
+  /** Prevent multi-poll 401 storms from re-entering logout + stacking Alerts (UI freeze). */
+  const logoutInflightRef = useRef(false);
+  const authFailStreakRef = useRef(0);
+  const authFailWindowRef = useRef(0);
+  const sessionExpiredAlertedRef = useRef(false);
+
+  /**
+   * Soft session death: only hard-logout after repeated 401s.
+   * A single 401 (API restart race, CF blip, mid-purge) must NOT freeze + kick the user.
+   */
+  const noteUnauthorized = useCallback(
+    (source = '') => {
+      const now = Date.now();
+      // Reset streak if last fail was long ago
+      if (now - (authFailWindowRef.current || 0) > 45000) {
+        authFailStreakRef.current = 0;
+      }
+      authFailWindowRef.current = now;
+      authFailStreakRef.current += 1;
+      const n = authFailStreakRef.current;
+      // Need several consecutive fails while app is active
+      if (n < 3) {
+        if (IS_DEV) {
+          console.warn('UNAUTHORIZED soft', source, n);
+        }
+        return false;
+      }
+      return true;
+    },
+    []
+  );
+
   const handleLogout = useCallback(async () => {
+    // Single-flight: parallel status/notify/chat 401s used to stack Alert + SecureStore
+    // and freeze the JS thread for seconds before the login screen appeared.
+    if (logoutInflightRef.current) return;
+    if (!authTokenRef.current) return;
+    logoutInflightRef.current = true;
+    authFailStreakRef.current = 0;
+
     // Revoke session server-side before wiping local token (stolen-token window)
     try {
       const tok = authTokenRef.current;
@@ -2869,7 +2910,7 @@ function AppInner() {
         await apiFetch('/logout', {
           method: 'POST',
           token: tok,
-          timeoutMs: 4000,
+          timeoutMs: 2500,
           body: {},
         }).catch(() => null);
       }
@@ -2882,6 +2923,7 @@ function AppInner() {
     pushOkRef.current = false;
     deviceRegisteredRef.current = false;
     loginInflightRef.current = false;
+    sessionExpiredAlertedRef.current = false;
     // Stop live radio if playing
     try {
       listenWantRef.current = false;
@@ -2906,18 +2948,25 @@ function AppInner() {
     setStreamsMap({});
     streamsMapRef.current = {};
     stopBackgroundNotifyFetch().catch(() => {});
+    // Don't await heavy cache wipe on the logout path (was freezing UI on large DBs)
     cacheClearAll().catch(() => {});
     try {
-      await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
-      await SecureStore.deleteItemAsync(SESSION_ROLE_KEY);
-      await SecureStore.deleteItemAsync(SESSION_USER_KEY);
-      await SecureStore.deleteItemAsync(SESSION_LEVEL_KEY);
-      await SecureStore.deleteItemAsync(SESSION_PERMS_KEY);
-      await SecureStore.deleteItemAsync(SESSION_MASTER_KEY);
+      // Parallel SecureStore deletes — sequential awaits stacked with Alert = freeze
+      await Promise.all([
+        SecureStore.deleteItemAsync(SESSION_TOKEN_KEY),
+        SecureStore.deleteItemAsync(SESSION_ROLE_KEY),
+        SecureStore.deleteItemAsync(SESSION_USER_KEY),
+        SecureStore.deleteItemAsync(SESSION_LEVEL_KEY),
+        SecureStore.deleteItemAsync(SESSION_PERMS_KEY),
+        SecureStore.deleteItemAsync(SESSION_MASTER_KEY),
+      ]);
     } catch (e) {
       console.warn('Failed to clear secure session', e);
     }
-    if (!mountedRef.current) return;
+    if (!mountedRef.current) {
+      logoutInflightRef.current = false;
+      return;
+    }
     setAuthToken(null);
     setUserRole(null);
     setAppUsername(null);
@@ -3004,7 +3053,35 @@ function AppInner() {
     pendingSessionRef.current = null;
     prevStatusRef.current = {};
     prevStatusReadyRef.current = false;
+    logoutInflightRef.current = false;
   }, [clearPushTimers]);
+
+  /**
+   * Handle API 401 without freezing: require a short fail streak, one Alert max,
+   * then a single logout. Background polls never spam modal dialogs.
+   */
+  const handleAuthFailure = useCallback(
+    (source = 'api') => {
+      if (!authTokenRef.current || logoutInflightRef.current) return;
+      if (!noteUnauthorized(source)) return;
+      if (
+        appStateRef.current === 'active' &&
+        !sessionExpiredAlertedRef.current
+      ) {
+        sessionExpiredAlertedRef.current = true;
+        try {
+          Alert.alert(
+            t('security.expired') || 'Session',
+            t('security.expired') || 'Session expired — sign in again.'
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      handleLogout();
+    },
+    [handleLogout, noteUnauthorized, t]
+  );
 
   /**
    * Register this APK/IPA with the API.
@@ -3133,7 +3210,7 @@ function AppInner() {
       return false;
     } catch (error) {
       if (error.code === 'UNAUTHORIZED') {
-        handleLogout();
+        handleAuthFailure('push');
         return false;
       }
       console.warn('Failed to register device:', error?.message || error);
@@ -3216,6 +3293,9 @@ function AppInner() {
         pushOkRef.current = false;
       }
       authTokenRef.current = token;
+      authFailStreakRef.current = 0;
+      logoutInflightRef.current = false;
+      sessionExpiredAlertedRef.current = false;
       // Hydrate UI from disk cache (stale-while-revalidate) — instant paint after unlock
       (async () => {
         try {
@@ -3238,7 +3318,9 @@ function AppInner() {
           if (cacheUsable(statsHit) && statsHit.data && mountedRef.current) {
             setStatsPayload(statsHit.data);
           }
-          const usersHit = await cacheGet('users', stationForCache);
+          const usersHit =
+            (await cacheGetUsers(stationForCache).catch(() => null)) ||
+            (await cacheGet('users', stationForCache));
           if (cacheUsable(usersHit) && Array.isArray(usersHit.data) && mountedRef.current) {
             setUsersList(usersHit.data);
             usersLoadedStationRef.current = stationForCache;
@@ -3441,6 +3523,12 @@ function AppInner() {
     async function boot() {
       if (bootedRef.current) return;
       bootedRef.current = true;
+      // Hard cap: never leave user on black boot spinner forever
+      const forceReady = setTimeout(() => {
+        if (mountedRef.current) setIsReady(true);
+      }, 4000);
+      // NEVER block first paint on cache/SQLite (missing native = hang → black screen)
+      cacheInit().catch(() => {});
       try {
         // Device integrity (rooted / jailbreak heuristics) — warn, still allow use
         try {
@@ -3582,6 +3670,7 @@ function AppInner() {
       } catch (e) {
         console.error('Boot error', e);
       } finally {
+        clearTimeout(forceReady);
         if (mountedRef.current) setIsReady(true);
       }
     }
@@ -3869,6 +3958,7 @@ function AppInner() {
         }
         setStatusLoaded((prev) => (prev ? prev : true));
         netFailCountRef.current = 0;
+        authFailStreakRef.current = 0; // real auth works — clear soft 401 streak
         // Always clear offline banner on a real /status success
         setConnectionOk(true);
         if ((statusChanged || isManualRefresh) && n > 0) {
@@ -3918,12 +4008,12 @@ function AppInner() {
           return false;
         }
         if (error.code === 'UNAUTHORIZED') {
-          // Only prompt when user is actually looking at the app
-          if (appStateRef.current === 'active') {
-            Alert.alert(t('security.expired') || 'Session', t('security.expired'));
-          }
-          handleLogout();
+          handleAuthFailure('status');
           return false;
+        }
+        // Successful path elsewhere resets streak; soft-clear on non-auth errors
+        if (authFailStreakRef.current > 0 && error.code !== 'NETWORK') {
+          /* keep streak for network-ish blips */
         }
         // Cancelled / superseded requests — not real offline
         if (
@@ -3968,7 +4058,7 @@ function AppInner() {
       }
       return !!statusInflightRef._lastChanged;
     },
-    [handleLogout, showBanner, applyForceUpdatePolicy, t]
+    [handleAuthFailure, showBanner, applyForceUpdatePolicy, t]
   );
 
   const fetchAdmin = useCallback(async () => {
@@ -3978,9 +4068,9 @@ function AppInner() {
       const data = await apiFetch('/admin', { token, timeoutMs: 12000 });
       if (mountedRef.current) setAdminData(data);
     } catch (error) {
-      if (error.code === 'UNAUTHORIZED') handleLogout();
+      if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
     }
-  }, [handleLogout]);
+  }, [handleAuthFailure]);
 
   const fetchSecurity = useCallback(
     async ({ silent = true } = {}) => {
@@ -3998,7 +4088,7 @@ function AppInner() {
           setSecurityData(data);
         }
       } catch (error) {
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else if (!silent && mountedRef.current) {
           showBanner(error.message || t('err.server'), 'warn');
         }
@@ -4038,7 +4128,7 @@ function AppInner() {
               fetchSecurity({ silent: true });
               fetchAdmin();
             } catch (error) {
-              if (error.code === 'UNAUTHORIZED') handleLogout();
+              if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
               else Alert.alert(t('security.title'), error.message || t('err.generic'));
             } finally {
               if (mountedRef.current) setSecurityBusy(false);
@@ -4125,6 +4215,7 @@ function AppInner() {
         if (!mountedRef.current) return false;
         // Any live API success keeps the online pill (not only /status)
         netFailCountRef.current = 0;
+        authFailStreakRef.current = 0;
         setConnectionOk(true);
         const items = Array.isArray(data?.items) ? data.items : [];
         // O(1) edge fingerprint — avoid O(n) title/body walk every poll
@@ -4217,7 +4308,7 @@ function AppInner() {
         }
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
-          handleLogout();
+          handleAuthFailure('notify');
           return false;
         }
         // Failed poll: keep cached feed painted (never blank the Alerts tab)
@@ -4246,7 +4337,7 @@ function AppInner() {
       return !!notifyInflightRef._lastChanged;
     },
     [
-      handleLogout,
+      handleAuthFailure,
       markNotificationsRead,
       notifyFilter,
       notifyStation,
@@ -4286,7 +4377,7 @@ function AppInner() {
                 pushActionLog(`Alerte supprimée ${item.id}`);
                 showBanner('Alerte supprimée', 'ok');
               } catch (error) {
-                if (error.code === 'UNAUTHORIZED') handleLogout();
+                if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
                 else Alert.alert('Alertes', error.message || 'Suppression impossible.');
               }
             },
@@ -4323,7 +4414,7 @@ function AppInner() {
               fetchNotifications({ silent: false });
               fetchAdmin();
             } catch (error) {
-              if (error.code === 'UNAUTHORIZED') handleLogout();
+              if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
               else Alert.alert('Alertes', error.message || 'Échec.');
             }
           },
@@ -4361,7 +4452,7 @@ function AppInner() {
       const unread = Number(data?.unread_total) || 0;
       setChatUnreadTotal((prev) => (prev === unread ? prev : unread));
     } catch (error) {
-      if (error.code === 'UNAUTHORIZED') handleLogout();
+      if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
     } finally {
       chatChannelsInflightRef.current = false;
     }
@@ -4379,7 +4470,7 @@ function AppInner() {
         });
         fetchChatChannels();
       } catch (error) {
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
       }
     },
     [fetchChatChannels, handleLogout]
@@ -4447,7 +4538,7 @@ function AppInner() {
         }
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
-          handleLogout();
+          handleAuthFailure('chat');
           return;
         }
         if (!silent) {
@@ -4457,7 +4548,7 @@ function AppInner() {
         if (!silent && mountedRef.current) setChatLoading(false);
       }
     },
-    [handleLogout, markChatRead, scrollChatToEnd]
+    [handleAuthFailure, markChatRead, scrollChatToEnd]
   );
 
   const openChatChannel = useCallback(
@@ -4633,7 +4724,7 @@ function AppInner() {
                     fetchChatMessages(channelId, { silent: true });
                     fetchChatChannels();
                   } catch (error) {
-                    if (error.code === 'UNAUTHORIZED') handleLogout();
+                    if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
                     else Alert.alert('Chat', error.message || 'Suppression impossible.');
                   }
                 },
@@ -4695,7 +4786,7 @@ function AppInner() {
         setChatInput('');
         sendTypingPing(false);
       } catch (error) {
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else Alert.alert('Chat', error.message || 'Échec modification.');
       } finally {
         if (mountedRef.current) setChatSending(false);
@@ -4759,7 +4850,7 @@ function AppInner() {
       setChatInput(sentText);
       if (sentImage) setPendingImage(sentImage);
       if (error.code === 'UNAUTHORIZED') {
-        handleLogout();
+        handleAuthFailure('chat_send');
         return;
       }
       Alert.alert('Chat', error.message || "Échec de l'envoi.");
@@ -4774,7 +4865,7 @@ function AppInner() {
     pendingImage,
     fetchChatChannels,
     fetchChatMessages,
-    handleLogout,
+    handleAuthFailure,
     sendTypingPing,
     scrollChatToEnd,
     canChatSend,
@@ -4817,7 +4908,7 @@ function AppInner() {
         scheduleRefresh(() => fetchStatus(false), COMMAND_REFRESH_MS);
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
-          handleLogout();
+          handleAuthFailure('command');
           return;
         }
         Alert.alert(
@@ -4829,7 +4920,7 @@ function AppInner() {
     },
     [
       fetchStatus,
-      handleLogout,
+      handleAuthFailure,
       pushActionLog,
       scheduleRefresh,
       canStartRadio,
@@ -4987,7 +5078,7 @@ function AppInner() {
         }
       } catch (error) {
         if (!mountedRef.current || gen !== statsFetchGenRef.current) return false;
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else if (!silent) {
           const peek = cachePeek('stats', station);
           if (!cacheUsable(peek) || force) {
@@ -5051,7 +5142,7 @@ function AppInner() {
         if (role !== 'OWNER' && returned) setPlaylistStation(returned);
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
-          handleLogout();
+          handleAuthFailure('playlist');
           return;
         }
         if (!silent && appStateRef.current === 'active') {
@@ -5097,7 +5188,7 @@ function AppInner() {
       scheduleRefresh(() => fetchPlaylist({ silent: true }), 12000);
       scheduleRefresh(() => fetchPlaylist({ silent: true }), 25000);
     } catch (error) {
-      if (error.code === 'UNAUTHORIZED') handleLogout();
+      if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
       else Alert.alert(t('playlist.add'), error.message || t('err.generic'));
     } finally {
       if (mountedRef.current) setPlaylistAdding(false);
@@ -5152,7 +5243,7 @@ function AppInner() {
                 showBanner(t('playlist.deleted'), 'ok');
                 lightVibrate();
               } catch (error) {
-                if (error.code === 'UNAUTHORIZED') handleLogout();
+                if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
                 else Alert.alert(t('playlist.title'), error.message || t('err.generic'));
               }
             },
@@ -5194,7 +5285,7 @@ function AppInner() {
               );
               warnVibrate();
             } catch (error) {
-              if (error.code === 'UNAUTHORIZED') handleLogout();
+              if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
               else Alert.alert(t('playlist.title'), error.message || t('err.generic'));
             }
           },
@@ -5280,7 +5371,9 @@ function AppInner() {
       if (mountedRef.current) setUsersError(null);
 
       try {
-        const cached = await cacheGet('users', station);
+        const cached =
+          (await cacheGetUsers(station).catch(() => null)) ||
+          (await cacheGet('users', station));
         if (
           cacheUsable(cached) &&
           Array.isArray(cached.data) &&
@@ -5326,7 +5419,7 @@ function AppInner() {
       } catch (error) {
         if (error?.name === 'AbortError' || error?.code === 'ABORT') return;
         if (error.code === 'UNAUTHORIZED') {
-          handleLogout();
+          handleAuthFailure('users');
           return;
         }
         if (!mountedRef.current || gen !== usersFetchGenRef.current) return;
@@ -5346,7 +5439,7 @@ function AppInner() {
         }
       }
     },
-    [handleLogout, normalizeUserRow]
+    [handleAuthFailure, normalizeUserRow]
   );
 
   /** Full-database search (room_time + all maps) */
@@ -5397,7 +5490,7 @@ function AppInner() {
       } catch (error) {
         if (error?.name === 'AbortError' || error?.code === 'ABORT') return;
         if (error.code === 'UNAUTHORIZED') {
-          handleLogout();
+          handleAuthFailure('users_search');
           return;
         }
       } finally {
@@ -5406,7 +5499,7 @@ function AppInner() {
         }
       }
     },
-    [handleLogout, normalizeUserRow]
+    [handleAuthFailure, normalizeUserRow]
   );
 
   const filteredUsers = useMemo(() => {
@@ -5519,7 +5612,7 @@ function AppInner() {
         if (!mountedRef.current) return;
         setAppUsersList(Array.isArray(data?.users) ? data.users : []);
       } catch (error) {
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else if (!silent) {
           Alert.alert(t('manage.title'), error.message || t('err.generic'));
         }
@@ -5599,7 +5692,7 @@ function AppInner() {
       lightVibrate();
       fetchAppUsers({ silent: true });
     } catch (error) {
-      if (error.code === 'UNAUTHORIZED') handleLogout();
+      if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
       else Alert.alert(t('manage.create'), error.message || t('err.generic'));
     } finally {
       if (mountedRef.current) setManageCreating(false);
@@ -5686,7 +5779,7 @@ function AppInner() {
         showBanner(t('manage.updated', { user: u.username || user.username }), 'ok');
         return u;
       } catch (error) {
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else Alert.alert(t('manage.title'), error.message || t('err.generic'));
         return null;
       }
@@ -5789,7 +5882,7 @@ function AppInner() {
                 setAppUsersList((prev) => prev.filter((x) => x.id !== user.id));
                 showBanner(t('manage.deleted', { user: user.username }), 'ok');
               } catch (error) {
-                if (error.code === 'UNAUTHORIZED') handleLogout();
+                if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
                 else Alert.alert(t('manage.title'), error.message || t('err.generic'));
               }
             },
@@ -5928,7 +6021,7 @@ function AppInner() {
       lightVibrate();
     } catch (error) {
       if (error.code === 'UNAUTHORIZED') {
-        handleLogout();
+        handleAuthFailure('user_edit');
         return;
       }
       setSelectedStationUser(previous);
@@ -5950,7 +6043,7 @@ function AppInner() {
     isOwner,
     canUsersEdit,
     fetchStationUsers,
-    handleLogout,
+    handleAuthFailure,
     pushActionLog,
     showBanner,
     t,
@@ -6029,7 +6122,7 @@ function AppInner() {
       fetchAdmin();
     } catch (error) {
       if (error.code === 'UNAUTHORIZED') {
-        handleLogout();
+        handleAuthFailure('notify_send');
         return;
       }
       Alert.alert(
@@ -6172,7 +6265,7 @@ function AppInner() {
         }
         return changed;
       } catch (error) {
-        if (error.code === 'UNAUTHORIZED') handleLogout();
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else if (mountedRef.current) {
           setLiveLogs((prev) => {
             const msg = error.message || 'Log fetch failed';
@@ -6951,7 +7044,7 @@ function AppInner() {
         }
         streamsInflightRef._lastChanged = streamsChanged;
       } catch (error) {
-        if (error?.code === 'UNAUTHORIZED') handleLogout();
+        if (error?.code === 'UNAUTHORIZED') handleAuthFailure('api');
         else if (!silent) {
           /* soft fail — player can still use fallback URLs */
         }
