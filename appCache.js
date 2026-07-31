@@ -2,13 +2,13 @@
  * Commander PRO — client cache (SQLite)
  *
  * L1: in-memory Map with LRU eviction (instant tab switches)
- * L2: expo-sqlite (survives restarts; no AsyncStorage JSON blobs)
+ * L2: expo-sqlite (survives restarts; AsyncStorage fallback if native missing)
  *
- * Stale-while-revalidate: paint cache immediately, refresh in background.
- * Soft TTL → show as "stale" but still paint.
- * Hard TTL → too old to paint (still kept until overwritten / logout).
+ * Stale-while-revalidate:
+ *  - Soft TTL → data is "stale": still paint, but network refresh ASAP
+ *  - Hard TTL → up to 7 days: still paint so resume/offline never looks empty
+ *  - Every successful API fetch overwrites cache (keeps it updated)
  *
- * Users: full station directory in SQL (rows + optional blob).
  * Tokens/passwords never stored here (SecureStore only).
  */
 
@@ -42,18 +42,39 @@ const FORBIDDEN_CACHE_PATTERNS = [
 /** key -> { ts, data, meta, lastAccess } */
 const mem = new Map();
 
+/** 7 days — keep painting cached radios/users/alerts for a full week */
+export const CACHE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Soft TTLs (ms) — after this, still show cache but treat as stale and revalidate.
+ * Live-ish data (status/streams) revalidates often; heavy data less often.
+ */
 export const CACHE_TTL = {
-  status: 120_000,
-  stats: 300_000,
-  users: 300_000,
-  playlist: 120_000,
-  notify: 180_000,
-  app_users: 180_000,
-  security: 90_000,
-  streams: 20_000,
+  status: 45_000, // process list — poll keeps it fresh; soft flag after 45s
+  streams: 20_000, // now-playing / listeners
+  notify: 90_000, // alerts feed
+  stats: 10 * 60_000, // 10 min
+  users: 15 * 60_000, // 15 min soft (full week hard paint)
+  playlist: 5 * 60_000,
+  app_users: 15 * 60_000,
+  security: 5 * 60_000,
 };
 
-const HARD_MULT = 36;
+/**
+ * Hard TTLs (ms) — refuse to paint only after this.
+ * Default: 1 week for everything so cold launch / offline still has data.
+ */
+export const CACHE_HARD_TTL = {
+  status: CACHE_WEEK_MS,
+  streams: CACHE_WEEK_MS,
+  notify: CACHE_WEEK_MS,
+  stats: CACHE_WEEK_MS,
+  users: CACHE_WEEK_MS,
+  playlist: CACHE_WEEK_MS,
+  app_users: CACHE_WEEK_MS,
+  security: CACHE_WEEK_MS,
+};
+
 const MEM_MAX_KEYS = 120;
 const MAX_USERS_CACHE = 100_000;
 const MAX_NOTIFY_CACHE = 400;
@@ -75,11 +96,11 @@ function fullKey(kind, id = '') {
 }
 
 function softTtl(kind) {
-  return CACHE_TTL[kind] || 60_000;
+  return CACHE_TTL[kind] || 5 * 60_000;
 }
 
 function hardTtl(kind) {
-  return softTtl(kind) * HARD_MULT;
+  return CACHE_HARD_TTL[kind] || CACHE_WEEK_MS;
 }
 
 function touchAccess(entry) {
@@ -803,9 +824,16 @@ export async function cacheClearAll() {
   }
 }
 
+/** True if we should paint this cache entry (not past hard / 7-day limit). */
 export function cacheUsable(peek) {
   if (!peek || peek.data == null) return false;
   return !peek.expired;
+}
+
+/** True if soft TTL elapsed — still paint, but network should refresh now. */
+export function cacheNeedsRefresh(peek) {
+  if (!peek || peek.data == null) return true;
+  return !!peek.stale || !!peek.expired;
 }
 
 export async function cacheFlush() {
@@ -835,7 +863,8 @@ export function cacheStats() {
     db: 'commander_pro_cache.db',
     prefix: PREFIX,
     ttls: { ...CACHE_TTL },
-    hardMult: HARD_MULT,
+    hardTtls: { ...CACHE_HARD_TTL },
+    weekMs: CACHE_WEEK_MS,
     maxUsers: MAX_USERS_CACHE,
   };
 }

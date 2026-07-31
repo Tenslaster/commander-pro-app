@@ -59,6 +59,7 @@ import {
   cacheClearAll,
   cachePeek,
   cacheUsable,
+  cacheNeedsRefresh,
   cacheRemove,
   cacheFlush,
   cacheInit,
@@ -3993,8 +3994,8 @@ function AppInner() {
               return mergeProcessList([], peek.data);
             });
             setStatusLoaded(true);
-            // Soft-online while we still have a fresh-enough snapshot
-            if (peek.ageMs != null && peek.ageMs < 120_000) {
+            // Soft-online while we still have a usable snapshot (up to hard week TTL)
+            if (peek.ageMs != null && !peek.expired) {
               setConnectionOk(true);
             }
           }
