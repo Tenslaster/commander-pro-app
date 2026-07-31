@@ -7,6 +7,9 @@
  * Stale-while-revalidate: paint cache immediately, refresh in background.
  * Soft TTL → show as "stale" but still paint.
  * Hard TTL → too old to paint (still kept until overwritten / logout).
+ *
+ * Users: full station directory (no 3500 cap). Large lists use chunked disk
+ * storage so AsyncStorage quotas don't drop the whole payload.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -30,33 +33,41 @@ const FORBIDDEN_CACHE_PATTERNS = [
 /** key -> { ts, data, meta, lastAccess } */
 const mem = new Map();
 
-/** Soft TTLs (ms) — how long data is considered fresh (aligned with API caches) */
+/**
+ * Soft TTLs (ms) — how long data is considered fresh.
+ * Users/stats: 5 minutes (was ~2–3 min). Status/notify: longer paint windows
+ * so returning to the main page never looks "offline empty" after a short blip.
+ */
 export const CACHE_TTL = {
-  status: 55_000, // process list — host status cache ~1.4s; paint longer
-  stats: 200_000, // ~3.3 min — room unique counts change slowly
-  users: 160_000, // large payload
-  playlist: 100_000,
-  notify: 70_000,
-  app_users: 140_000,
-  security: 55_000,
-  streams: 12_000, // Icecast title/listeners (server TTL ~4–14s)
+  status: 120_000, // 2 min soft — process list paints on resume
+  stats: 300_000, // 5 min
+  users: 300_000, // 5 min — full radio directory
+  playlist: 120_000,
+  notify: 180_000, // 3 min — alerts feed survives tab switches / resume
+  app_users: 180_000,
+  security: 90_000,
+  streams: 20_000, // Icecast title/listeners
 };
 
 /** Hard expiry = soft × HARD_MULT (still paint while soft < age < hard) */
-const HARD_MULT = 28; // e.g. stats soft → hard ~90m offline paint
+const HARD_MULT = 36; // users soft 5m → hard ~3h offline paint
 
-/** Max entries in L1 (LRU by lastAccess) */
-const MEM_MAX_KEYS = 80;
+/** Max entries in L1 (LRU by lastAccess) — raised for multi-radio owners */
+const MEM_MAX_KEYS = 120;
 
-/** Payload size caps (disk) */
-const MAX_USERS_CACHE = 3500;
-const MAX_NOTIFY_CACHE = 200; // match smaller server feed (800) — phone needs less
-const MAX_PLAYLIST_SONGS = 600;
-const MAX_STATUS_ROWS = 120;
+/**
+ * No artificial user cap — radios can hold 10k–20k+ names.
+ * Disk uses chunked storage so a single multiSet never blows AsyncStorage.
+ */
+const MAX_USERS_CACHE = 100_000;
+const USERS_CHUNK_SIZE = 2_500;
+const MAX_NOTIFY_CACHE = 400;
+const MAX_PLAYLIST_SONGS = 800;
+const MAX_STATUS_ROWS = 200;
 
 /** Debounce disk writes so rapid polls don't thrash AsyncStorage */
-const DISK_FLUSH_MS = 700;
-const pendingDisk = new Map(); // key -> JSON string
+const DISK_FLUSH_MS = 500;
+const pendingDisk = new Map(); // key -> JSON string | special users job
 let flushTimer = null;
 let legacyCleaned = false;
 
@@ -65,7 +76,7 @@ function fullKey(kind, id = '') {
 }
 
 function softTtl(kind) {
-  return CACHE_TTL[kind] || 45_000;
+  return CACHE_TTL[kind] || 60_000;
 }
 
 function hardTtl(kind) {
@@ -79,8 +90,7 @@ function touchAccess(entry) {
 /** Evict least-recently-used memory entries when over cap (O(n), no sort alloc when tiny). */
 function memEvictIfNeeded() {
   if (mem.size <= MEM_MAX_KEYS) return;
-  const drop = mem.size - MEM_MAX_KEYS + 6;
-  // Two-pass min-find: avoid sorting whole map on every set under flood
+  const drop = mem.size - MEM_MAX_KEYS + 8;
   for (let d = 0; d < drop; d += 1) {
     let oldestKey = null;
     let oldestTs = Infinity;
@@ -136,6 +146,7 @@ function compactStatusRow(p) {
 /**
  * Shrink large payloads for disk efficiency.
  * Memory may still hold a larger slice when set from network.
+ * Users are NOT truncated to 3500 — full catalog is kept (capped only at absolute max).
  */
 function preparePayload(kind, data, meta) {
   let payload = data;
@@ -185,26 +196,112 @@ function scheduleDiskFlush() {
   }, DISK_FLUSH_MS);
 }
 
-async function flushDiskPending() {
-  if (!pendingDisk.size) return;
-  const pairs = [];
-  pendingDisk.forEach((value, key) => {
-    pairs.push([key, value]);
+/**
+ * Write large user arrays as chunked keys so one failed multiSet never drops
+ * the entire directory. Format:
+ *   main key: { ts, meta, chunked: true, chunks: N, total: T }
+ *   chunk keys: `${main}:c0` … `${main}:cN-1` → JSON array
+ */
+async function writeUsersChunked(mainKey, ts, payload, metaOut) {
+  const chunks = [];
+  for (let i = 0; i < payload.length; i += USERS_CHUNK_SIZE) {
+    chunks.push(payload.slice(i, i + USERS_CHUNK_SIZE));
+  }
+  const header = JSON.stringify({
+    ts,
+    data: null,
+    meta: metaOut,
+    chunked: true,
+    chunks: chunks.length,
+    total: payload.length,
   });
-  pendingDisk.clear();
+  const pairs = [[mainKey, header]];
+  for (let i = 0; i < chunks.length; i += 1) {
+    pairs.push([`${mainKey}:c${i}`, JSON.stringify(chunks[i])]);
+  }
+  // Drop stale chunks if list shrank
   try {
-    // multiSet is much cheaper than many setItem calls under load
-    await AsyncStorage.multiSet(pairs);
+    const all = await AsyncStorage.getAllKeys();
+    const prefix = `${mainKey}:c`;
+    const stale = (all || []).filter(
+      (k) => k.startsWith(prefix) && !pairs.some(([pk]) => pk === k)
+    );
+    if (stale.length) await AsyncStorage.multiRemove(stale);
   } catch {
-    // Quota / disk errors — L1 memory still serves the UI
+    /* ignore */
+  }
+  await AsyncStorage.multiSet(pairs);
+}
+
+async function readUsersChunked(mainKey, parsed) {
+  const n = Math.max(0, parseInt(parsed.chunks, 10) || 0);
+  if (!n) return Array.isArray(parsed.data) ? parsed.data : [];
+  const keys = [];
+  for (let i = 0; i < n; i += 1) keys.push(`${mainKey}:c${i}`);
+  const pairs = await AsyncStorage.multiGet(keys);
+  const out = [];
+  for (let i = 0; i < pairs.length; i += 1) {
+    const raw = pairs[i]?.[1];
+    if (!raw) continue;
     try {
-      // Fallback: write smaller critical keys only
-      for (const [k, v] of pairs) {
-        if (k.includes(':users:') || k.includes(':status')) continue;
-        await AsyncStorage.setItem(k, v);
+      const part = JSON.parse(raw);
+      if (Array.isArray(part)) {
+        for (let j = 0; j < part.length; j += 1) out.push(part[j]);
       }
     } catch {
-      /* ignore */
+      /* skip bad chunk */
+    }
+  }
+  return out;
+}
+
+async function flushDiskPending() {
+  if (!pendingDisk.size) return;
+  const jobs = [];
+  pendingDisk.forEach((value, key) => {
+    jobs.push([key, value]);
+  });
+  pendingDisk.clear();
+
+  const simplePairs = [];
+  const usersJobs = [];
+
+  for (const [k, v] of jobs) {
+    if (v && typeof v === 'object' && v.__usersChunks) {
+      usersJobs.push([k, v]);
+    } else {
+      simplePairs.push([k, v]);
+    }
+  }
+
+  try {
+    if (simplePairs.length) await AsyncStorage.multiSet(simplePairs);
+  } catch {
+    // Quota / disk errors — retry one-by-one, never skip status/notify
+    for (const [k, v] of simplePairs) {
+      try {
+        await AsyncStorage.setItem(k, v);
+      } catch {
+        /* ignore single key */
+      }
+    }
+  }
+
+  for (const [k, job] of usersJobs) {
+    try {
+      await writeUsersChunked(k, job.ts, job.payload, job.metaOut);
+    } catch {
+      // Fallback: try smaller single blob (may fail on huge lists)
+      try {
+        const raw = JSON.stringify({
+          ts: job.ts,
+          data: job.payload.slice(0, 4000),
+          meta: { ...(job.metaOut || {}), truncated: true, fallback: true },
+        });
+        await AsyncStorage.setItem(k, raw);
+      } catch {
+        /* L1 memory still serves the UI */
+      }
     }
   }
 }
@@ -263,9 +360,18 @@ export async function cacheGet(kind, id = '') {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return null;
+
+    let data = parsed.data;
+    // Reassemble chunked users directory
+    if (kind === 'users' && parsed.chunked) {
+      data = await readUsersChunked(k, parsed);
+    }
+
+    if (data === undefined || data === null) return null;
+
     const entry = {
       ts: parsed.ts || 0,
-      data: parsed.data,
+      data,
       meta: parsed.meta,
       lastAccess: Date.now(),
     };
@@ -298,17 +404,17 @@ export async function cacheSet(kind, id, data, meta = null) {
   const k = fullKey(kind, id || '');
   const { payload, metaOut } = preparePayload(kind, data, meta);
   // L1 keeps the full users array for instant tab paint; L2 disk stays compact.
-  // Previously mem held the truncated slice → switching back to RADIO1 lost rows.
   const memData =
-    kind === 'users' && Array.isArray(data)
-      ? data
-      : payload;
+    kind === 'users' && Array.isArray(data) ? data : payload;
 
   // Defense-in-depth: refuse to persist anything that looks like a secret
   try {
-    const probe = JSON.stringify(payload);
+    const probe = JSON.stringify(
+      kind === 'users' && Array.isArray(payload)
+        ? payload.slice(0, 20)
+        : payload
+    );
     if (probe && FORBIDDEN_CACHE_PATTERNS.some((re) => re.test(probe))) {
-      // Keep L1 only without secrets — drop entirely if contaminated
       return;
     }
   } catch {
@@ -323,12 +429,11 @@ export async function cacheSet(kind, id, data, meta = null) {
     lastAccess: now,
   };
 
-  // Skip disk/work if payload looks unchanged (rapid polls) — avoid JSON.stringify
+  // Skip disk/work if payload looks unchanged (rapid polls)
   const prev = mem.get(k);
   if (prev && prev.data !== undefined) {
     try {
       let same = false;
-      // Compare against L1 shape (users keep full array in mem)
       const compareArr = Array.isArray(memData) ? memData : payload;
       if (Array.isArray(compareArr) && Array.isArray(prev.data)) {
         const a = prev.data;
@@ -336,8 +441,7 @@ export async function cacheSet(kind, id, data, meta = null) {
         if (a.length === b.length) {
           if (a.length === 0) {
             same = true;
-          } else if (kind === 'status' && a.length <= 120) {
-            // Status rows are small — compare status+pid without stringify
+          } else if (kind === 'status' && a.length <= MAX_STATUS_ROWS) {
             same = true;
             for (let i = 0; i < a.length; i += 1) {
               if (
@@ -350,8 +454,17 @@ export async function cacheSet(kind, id, data, meta = null) {
                 break;
               }
             }
+          } else if (kind === 'users' && a.length > 50) {
+            // Cheap multi-edge fingerprint for large user catalogs
+            const mid = a[Math.floor(a.length / 2)];
+            const midB = b[Math.floor(b.length / 2)];
+            same =
+              (a[0]?.id || a[0]?.username) === (b[0]?.id || b[0]?.username) &&
+              (a[a.length - 1]?.id || a[a.length - 1]?.username) ===
+                (b[b.length - 1]?.id || b[b.length - 1]?.username) &&
+              (mid?.id || mid?.username) === (midB?.id || midB?.username) &&
+              (prev.meta?.total ?? a.length) === (metaOut?.total ?? b.length);
           } else {
-            // Cheap edge fingerprint for large arrays (users / notify)
             same =
               (a[0]?.id || a[0]?.username || a[0]?.text) ===
                 (b[0]?.id || b[0]?.username || b[0]?.text) &&
@@ -371,7 +484,6 @@ export async function cacheSet(kind, id, data, meta = null) {
         typeof payload === 'object' &&
         typeof prev.data === 'object'
       ) {
-        // streams: compare station title/listeners only
         const ps = prev.data.stations || prev.data;
         const ns = payload.stations || payload;
         const pk = Object.keys(ps || {});
@@ -393,7 +505,6 @@ export async function cacheSet(kind, id, data, meta = null) {
           }
         }
       } else {
-        // Last resort for small objects only
         const sa = JSON.stringify(prev.data);
         const sb = JSON.stringify(payload);
         same =
@@ -414,12 +525,22 @@ export async function cacheSet(kind, id, data, meta = null) {
   memEvictIfNeeded();
 
   try {
-    const raw = JSON.stringify({
-      ts: entry.ts,
-      data: payload,
-      meta: metaOut,
-    });
-    pendingDisk.set(k, raw);
+    if (kind === 'users' && Array.isArray(payload)) {
+      // Always chunk users — never a single giant JSON blob
+      pendingDisk.set(k, {
+        __usersChunks: true,
+        ts: entry.ts,
+        payload,
+        metaOut,
+      });
+    } else {
+      const raw = JSON.stringify({
+        ts: entry.ts,
+        data: payload,
+        meta: metaOut,
+      });
+      pendingDisk.set(k, raw);
+    }
     scheduleDiskFlush();
   } catch {
     /* serialize failed — memory still holds data */
@@ -431,7 +552,12 @@ export async function cacheRemove(kind, id = '') {
   mem.delete(k);
   pendingDisk.delete(k);
   try {
-    await AsyncStorage.removeItem(k);
+    const keys = await AsyncStorage.getAllKeys();
+    const ours = (keys || []).filter(
+      (x) => x === k || x.startsWith(`${k}:c`)
+    );
+    if (ours.length) await AsyncStorage.multiRemove(ours);
+    else await AsyncStorage.removeItem(k);
   } catch {
     /* ignore */
   }
@@ -485,5 +611,6 @@ export function cacheStats() {
     ttls: { ...CACHE_TTL },
     hardMult: HARD_MULT,
     maxUsers: MAX_USERS_CACHE,
+    usersChunk: USERS_CHUNK_SIZE,
   };
 }

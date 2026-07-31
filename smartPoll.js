@@ -144,6 +144,7 @@ export function startSmartLoop(tick, opts) {
         schedule(idleMs);
         return;
       }
+      // active: if we just left a long bg delay, budget.boost() is called from App.js
     }
     if (inflight) {
       schedule(Math.min(2500, Math.max(800, budget.peek())));

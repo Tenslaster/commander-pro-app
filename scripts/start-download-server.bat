@@ -18,6 +18,9 @@ echo  https://crew.kingdom.forum/downloads/ipa
 echo  https://crew.kingdom.forum/downloads/withyou
 echo  https://crew.kingdom.forum/downloads/withyou/apk
 echo  https://crew.kingdom.forum/downloads/withyou/ipa
+echo  https://crew.kingdom.forum/download/pulse
+echo  https://crew.kingdom.forum/download/pulse/apk
+echo  https://crew.kingdom.forum/download/pulse/ipa
 echo.
 echo  Local: http://127.0.0.1:%DOWNLOAD_PORT%/downloads
 echo  Needs Cloudflare Tunnel path /downloads -^> :8787
@@ -37,3 +40,4 @@ echo Server stopped.
 pause
 endlocal
 exit /b %ERRORLEVEL%
+

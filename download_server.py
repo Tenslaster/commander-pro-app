@@ -3,15 +3,14 @@
 """
 Crew downloads — https://crew.kingdom.forum/downloads
 
-  /downloads                 → HTML hub (Commander PRO + WithYou)
-  /downloads/apk             → CommanderPro.apk
-  /downloads/ipa             → CommanderPro.ipa
-  /downloads/withyou         → WithYou download page
-  /downloads/withyou/apk     → WithYou.apk
-  /downloads/withyou/ipa     → WithYou.ipa (Sideloadly)
+  /downloads                 → Commander PRO
+  /downloads/apk|ipa         → Commander files
+  /downloads/withyou…        → WithYou
+  /download/pulse            → Pulse Music page  (also /downloads/pulse)
+  /download/pulse/apk|ipa    → Pulse APK / IPA (latest)
 
-Local: http://0.0.0.0:8787/downloads
-Cloudflare: path /downloads → :8787
+Local: http://0.0.0.0:8787
+Cloudflare: /downloads* and /download* → :8787
 """
 
 from __future__ import annotations
@@ -46,6 +45,11 @@ WITHYOU_APK = (WITHYOU_DIST / "WithYou.apk").resolve()
 WITHYOU_IPA = (WITHYOU_DIST / "WithYou.ipa").resolve()
 # also accept Sideloadly filename if WithYou.ipa missing
 WITHYOU_IPA_ALT = (WITHYOU_DIST / "WithYou-Sideloadly.ipa").resolve()
+
+# Pulse Music artifacts
+PULSE_DIST = (ROOT.parent.parent / "PulseVault" / "dist").resolve()
+PULSE_APP_JSON = (ROOT.parent.parent / "PulseVault" / "ios-app" / "app.json").resolve()
+PULSE_PUBLIC = "https://crew.kingdom.forum/download/pulse"
 
 PREFIX = "/downloads"
 CHUNK = 64 * 1024  # smaller chunks = better mobile / Cloudflare stream
@@ -118,6 +122,60 @@ def _withyou_ipa() -> Path:
     if WITHYOU_IPA.is_file():
         return WITHYOU_IPA
     return WITHYOU_IPA_ALT
+
+
+def _pulse_version() -> str:
+    try:
+        if PULSE_APP_JSON.is_file():
+            data = json.loads(PULSE_APP_JSON.read_text(encoding="utf-8-sig"))
+            v = (data.get("expo") or {}).get("version")
+            if v:
+                return str(v).strip()
+    except Exception:
+        pass
+    # fallback from latest ipa filename pulse-1.9.7.ipa
+    ipa = _latest_pulse_file("*.ipa")
+    if ipa:
+        name = ipa.stem  # pulse-1.9.7
+        if name.lower().startswith("pulse-"):
+            return name[6:]
+    return "—"
+
+
+def _latest_pulse_file(pattern: str) -> Path | None:
+    """Newest pulse-*.ipa / pulse-*.apk by mtime under PulseVault/dist."""
+    try:
+        if not PULSE_DIST.is_dir():
+            return None
+        files = [p for p in PULSE_DIST.glob(pattern) if p.is_file()]
+        if not files:
+            # also check dist/apk dist/ipa
+            files = [p for p in PULSE_DIST.rglob(pattern) if p.is_file()]
+        if not files:
+            return None
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0].resolve()
+    except OSError:
+        return None
+
+
+def _pulse_apk() -> Path:
+    # Prefer stable name, else newest pulse-*.apk
+    stable = (PULSE_DIST / "PulseMusic.apk").resolve()
+    if stable.is_file():
+        return stable
+    found = _latest_pulse_file("*.apk")
+    return found if found else stable
+
+
+def _pulse_ipa() -> Path:
+    stable = (PULSE_DIST / "PulseMusic.ipa").resolve()
+    if stable.is_file():
+        return stable
+    found = _latest_pulse_file("pulse-*.ipa")
+    if not found:
+        found = _latest_pulse_file("*.ipa")
+    return found if found else stable
 
 
 def _card(
@@ -388,8 +446,110 @@ def _withyou_page() -> bytes:
     return body.encode("utf-8")
 
 
+def _pulse_page() -> bytes:
+    """Minimal Pulse Music install page — red, simple, no clutter."""
+    ver = html.escape(_pulse_version())
+    apk_path = _pulse_apk()
+    ipa_path = _pulse_ipa()
+    apk_ok = _safe_file(apk_path, PULSE_DIST)
+    ipa_ok = _safe_file(ipa_path, PULSE_DIST)
+    apk_size = html.escape(_size_label(apk_path)) if apk_ok else ""
+    ipa_size = html.escape(_size_label(ipa_path)) if ipa_ok else ""
+    apk_href = html.escape(f"{PULSE_PUBLIC}/apk")
+    ipa_href = html.escape(f"{PULSE_PUBLIC}/ipa")
+
+    def _row(title: str, size: str, href: str, ok: bool, label: str) -> str:
+        if ok:
+            btn = (
+                f'<a class="dl" href="{href}" rel="noopener noreferrer" '
+                f'download="{html.escape(label)}">{html.escape(label)}'
+                f'<span>{size}</span></a>'
+            )
+        else:
+            btn = f'<div class="dl off">{html.escape(label)}<span>Unavailable</span></div>'
+        return f"""
+    <section class="card">
+      <h2>{html.escape(title)}</h2>
+      {btn}
+    </section>"""
+
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <title>Pulse Music</title>
+  <style>
+    :root {{ color-scheme: dark; --red: #e11d2e; --red2: #ff2d3d; --bg: #050505; --card: #111; --line: #222; --muted: #6b6b6b; --text: #f2f2f2; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; align-items: center; justify-content: center;
+      padding: 32px 18px 40px;
+      background-image: radial-gradient(700px 320px at 50% -8%, #1a0508 0%, transparent 70%);
+    }}
+    main {{ width: 100%; max-width: 400px; }}
+    .mark {{
+      width: 56px; height: 56px; border-radius: 16px;
+      display: grid; place-items: center; font-size: 1.35rem; font-weight: 800;
+      background: linear-gradient(145deg, var(--red2), var(--red) 60%, #9b1020);
+      box-shadow: 0 12px 32px rgba(225, 29, 46, 0.28);
+      margin-bottom: 18px;
+    }}
+    h1 {{ font-size: 1.65rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.15; }}
+    .ver {{
+      display: inline-block; margin-top: 10px; margin-bottom: 28px;
+      font-size: 0.78rem; font-weight: 650; color: #ff8a93;
+      padding: 5px 11px; border-radius: 999px;
+      background: rgba(225, 29, 46, 0.12); border: 1px solid rgba(225, 29, 46, 0.28);
+    }}
+    .card {{
+      background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+      padding: 16px; margin-bottom: 12px;
+    }}
+    .card h2 {{
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 12px;
+    }}
+    a.dl, .dl.off {{
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      width: 100%; text-decoration: none; border-radius: 12px;
+      padding: 14px 16px; font-weight: 700; font-size: 0.98rem;
+    }}
+    a.dl {{
+      color: #fff;
+      background: linear-gradient(135deg, var(--red2), var(--red));
+      box-shadow: 0 8px 22px rgba(225, 29, 46, 0.25);
+    }}
+    a.dl:hover {{ filter: brightness(1.06); }}
+    a.dl:active {{ transform: scale(0.99); }}
+    a.dl span, .dl.off span {{ font-size: 0.8rem; font-weight: 600; opacity: 0.9; }}
+    .dl.off {{ background: #1a1a1a; color: #555; cursor: not-allowed; }}
+    footer {{ margin-top: 22px; text-align: center; font-size: 0.7rem; color: #3a3a3a; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true">P</div>
+    <h1>Pulse Music</h1>
+    <div class="ver">v{ver}</div>
+    {_row("Android", apk_size, apk_href, apk_ok, "APK")}
+    {_row("iPhone", ipa_size, ipa_href, ipa_ok, "IPA")}
+    <footer>Private builds</footer>
+  </main>
+</body>
+</html>
+"""
+    return body.encode("utf-8")
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CrewDownloads/2.0"
+    server_version = "CrewDownloads/2.1"
     sys_version = ""
 
     def log_message(self, fmt: str, *args) -> None:
@@ -399,27 +559,44 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
+        self.send_header("X-DNS-Prefetch-Control", "off")
+        self.send_header("X-Permitted-Cross-Domain-Policies", "none")
         self.send_header(
             "Permissions-Policy",
-            "geolocation=(), microphone=(), camera=(), payment=(), usb=()",
+            "geolocation=(), microphone=(), camera=(), payment=(), usb=(), "
+            "interest-cohort=(), browsing-topics=()",
         )
-        # APK/IPA must be downloadable from phone browsers; CORP same-site
-        # has broken installs on some Android Chrome + Cloudflare combos.
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        # Files: allow download from phone browsers (CF + Chrome). HTML: locked down.
         if for_file:
             self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "Content-Length, Content-Range, Accept-Ranges, Content-Disposition",
+            )
+            self.send_header("Cache-Control", "public, max-age=300, immutable")
         else:
-            self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; "
-                "img-src 'self' data:; font-src 'none'; connect-src 'none'; "
-                "script-src 'none'; object-src 'none'; base-uri 'none'; "
-                "form-action 'none'; frame-ancestors 'none'",
+                "default-src 'none'; "
+                "style-src 'unsafe-inline'; "
+                "img-src 'none'; "
+                "font-src 'none'; "
+                "connect-src 'none'; "
+                "script-src 'none'; "
+                "object-src 'none'; "
+                "base-uri 'none'; "
+                "form-action 'none'; "
+                "frame-ancestors 'none'; "
+                "upgrade-insecure-requests",
             )
+            self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header(
-            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            "Strict-Transport-Security",
+            "max-age=63072000; includeSubDomains; preload",
         )
 
     def _normalize_path(self) -> str:
@@ -453,6 +630,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(data, body)
             return
 
+        # Pulse Music — public: /download/pulse (also /downloads/pulse)
+        if path in (
+            "/download/pulse",
+            f"{PREFIX}/pulse",
+            "/pulse-download",
+        ):
+            data = _pulse_page()
+            self._send_html(data, body)
+            return
+
         if path in (f"{PREFIX}/apk", "/apk", f"/download/apk"):
             self._send_file(APK_PATH, APK_NAME, "application/vnd.android.package-archive", body, DIST)
             return
@@ -472,7 +659,35 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file(ipa, "WithYou.ipa", "application/octet-stream", body, WITHYOU_DIST)
             return
 
-        self.send_error(404, "Not found — use /downloads")
+        if path in (
+            "/download/pulse/apk",
+            f"{PREFIX}/pulse/apk",
+        ):
+            apk = _pulse_apk()
+            self._send_file(
+                apk,
+                "PulseMusic.apk",
+                "application/vnd.android.package-archive",
+                body,
+                PULSE_DIST,
+            )
+            return
+
+        if path in (
+            "/download/pulse/ipa",
+            f"{PREFIX}/pulse/ipa",
+        ):
+            ipa = _pulse_ipa()
+            self._send_file(
+                ipa,
+                "PulseMusic.ipa",
+                "application/octet-stream",
+                body,
+                PULSE_DIST,
+            )
+            return
+
+        self.send_error(404, "Not found — use /downloads or /download/pulse")
 
     def _send_html(self, data: bytes, body: bool) -> None:
         self.send_response(200)
@@ -571,23 +786,29 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    pulse_apk = _pulse_apk()
+    pulse_ipa = _pulse_ipa()
     print("=" * 52)
     print(" Downloads server")
-    print("   /downloads          = Commander PRO only")
-    print("   /downloads/withyou  = WithYou only")
+    print("   /downloads              = Commander PRO")
+    print("   /downloads/withyou      = WithYou")
+    print("   /download/pulse         = Pulse Music")
     print("=" * 52)
     print(f" Commander APK: {'OK' if _safe_file(APK_PATH, DIST) else 'MISSING'}  {APK_PATH}")
     print(f" Commander IPA: {'OK' if _safe_file(IPA_PATH, DIST) else 'MISSING'}  {IPA_PATH}")
     print(f" WithYou APK:   {'OK' if _safe_file(WITHYOU_APK, WITHYOU_DIST) else 'MISSING'}  {WITHYOU_APK}")
     ipa = _withyou_ipa()
     print(f" WithYou IPA:   {'OK' if _safe_file(ipa, WITHYOU_DIST) else 'MISSING'}  {ipa}")
+    print(f" Pulse APK:     {'OK' if _safe_file(pulse_apk, PULSE_DIST) else 'MISSING'}  {pulse_apk}")
+    print(f" Pulse IPA:     {'OK' if _safe_file(pulse_ipa, PULSE_DIST) else 'MISSING'}  {pulse_ipa}  (v{_pulse_version()})")
     print(f" Listen: http://{HOST}:{PORT}{PREFIX}")
     print()
     print(" Public:")
-    print(f"   {PUBLIC_BASE}              (Commander)")
-    print(f"   {PUBLIC_BASE}/withyou      (WithYou page)")
-    print(f"   {PUBLIC_BASE}/withyou/apk")
-    print(f"   {PUBLIC_BASE}/withyou/ipa")
+    print(f"   {PUBLIC_BASE}                 (Commander)")
+    print(f"   {PUBLIC_BASE}/withyou         (WithYou)")
+    print(f"   {PULSE_PUBLIC}       (Pulse page)")
+    print(f"   {PULSE_PUBLIC}/apk")
+    print(f"   {PULSE_PUBLIC}/ipa")
     print("=" * 52)
 
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)

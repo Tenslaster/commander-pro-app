@@ -59,6 +59,7 @@ import {
   cachePeek,
   cacheUsable,
   cacheRemove,
+  cacheFlush,
 } from './appCache';
 import {
   createAdaptiveBudget,
@@ -156,7 +157,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.8';
+const APP_VERSION = '1.4.9';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -379,15 +380,15 @@ const CHAT_READ_PREFIX = 'chat_read_';
  * Active tab snappy; idle tabs / battery much lighter. In-flight always coalesced.
  */
 /** Smart adaptive ranges (min when busy / max when quiet) */
-const POLL_STATUS_MS = 3500; // host /api/status cache ~1.4s — no need to spam
-const POLL_STATUS_IDLE_MS = 22000;
-const POLL_STATUS_MAX_MS = 36000;
+const POLL_STATUS_MS = 3000; // host /api/status cache ~1.4s — snappy main page
+const POLL_STATUS_IDLE_MS = 18000;
+const POLL_STATUS_MAX_MS = 32000;
 const POLL_LOGS_MS = 4500;
 const POLL_LOGS_MAX_MS = 16000;
 const POLL_ADMIN_MS = 24000;
-const POLL_NOTIFY_MS = 6000;
-const POLL_NOTIFY_IDLE_MS = 28000;
-const POLL_NOTIFY_MAX_MS = 48000;
+const POLL_NOTIFY_MS = 4500; // alerts must feel live on the Alerts tab
+const POLL_NOTIFY_IDLE_MS = 16000;
+const POLL_NOTIFY_MAX_MS = 36000;
 const POLL_CHAT_MS = 3200;
 const POLL_CHAT_MAX_MS = 12000;
 const POLL_CHAT_LIST_MS = 6000;
@@ -799,6 +800,9 @@ const processListEqual = (prev, next) => {
 
 /** Reuse previous row objects when unchanged → React.memo ProcessCard stays cold. */
 const mergeProcessList = (prev, next) => {
+  // Never let a transient empty API snapshot wipe a known-good list
+  // (host restart / empty status cache blip → "offline empty" main page).
+  if (Array.isArray(next) && next.length === 0 && prev?.length) return prev;
   if (!prev?.length) return next;
   if (processListEqual(prev, next)) return prev;
   const prevById = new Map(prev.map((p) => [p.id, p]));
@@ -2375,8 +2379,15 @@ function AppInner() {
   const usersStationRef = useRef('RADIO1');
 
   const flatListRef = useRef(null);
-  /** Terminal autoscroll only when user is near bottom (prevents scroll glitch). */
+  /**
+   * Terminal scroll stick (inverted list = newest at visual bottom).
+   * Hysteresis + drag lock so poll updates never fight manual scroll.
+   */
   const terminalNearBottomRef = useRef(true);
+  const terminalDraggingRef = useRef(false);
+  const terminalNeedStickRef = useRef(false);
+  /** Log rows arrived while user was dragging — apply after gesture ends */
+  const pendingLogsRef = useRef(null);
   const notifyListRef = useRef(null);
   const chatListRef = useRef(null);
   const chatStickToBottomRef = useRef(true);
@@ -2417,6 +2428,10 @@ function AppInner() {
   /** Prevent overlapping polls (slow networks) from stacking work */
   const statusInflightRef = useRef(false);
   const statusFpRef = useRef('');
+  /** Mirror of processes.length for resume/empty-guard without stale closures */
+  const processesLenRef = useRef(0);
+  /** Consecutive empty /status bodies (only wipe after confirmed empties) */
+  const emptyStatusStreakRef = useRef(0);
   const streamsFpRef = useRef('');
   const statsFpRef = useRef('');
   // Adaptive budgets — calm when quiet, snappy when data moves
@@ -2494,6 +2509,10 @@ function AppInner() {
   useEffect(() => {
     mainTabRef.current = mainTab;
   }, [mainTab]);
+
+  useEffect(() => {
+    processesLenRef.current = Array.isArray(processes) ? processes.length : 0;
+  }, [processes]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -2906,6 +2925,9 @@ function AppInner() {
     setAppPermissions([]);
     setIsMasterLogin(false);
     setProcesses([]);
+    processesLenRef.current = 0;
+    emptyStatusStreakRef.current = 0;
+    statusFpRef.current = '';
     setStatusLoaded(false);
     setSearchQuery('');
     setSearchBarKey((k) => k + 1);
@@ -3201,6 +3223,14 @@ function AppInner() {
           if (cacheUsable(st) && Array.isArray(st.data) && st.data.length && mountedRef.current) {
             setProcesses((prev) => (prev?.length ? prev : st.data));
             setStatusLoaded(true);
+            setConnectionOk(true);
+            processesLenRef.current = st.data.length;
+            // Seed fingerprint so first live poll can detect real changes
+            try {
+              statusFpRef.current = fingerprintProcesses(st.data);
+            } catch {
+              /* ignore */
+            }
           }
           const stationForCache =
             role && role !== 'OWNER' && STATION_IDS.includes(role) ? role : 'RADIO1';
@@ -3216,6 +3246,12 @@ function AppInner() {
           const notifyHit = await cacheGet('notify', '');
           if (cacheUsable(notifyHit) && Array.isArray(notifyHit.data) && mountedRef.current) {
             setNotifyFeed(notifyHit.data);
+            // Seed known IDs so we don't re-banner old alerts; new ones still fire
+            if (knownNotifyIdsRef.current.size === 0) {
+              knownNotifyIdsRef.current = new Set(
+                notifyHit.data.map((it) => it?.id).filter(Boolean)
+              );
+            }
           }
         } catch {
           /* ignore cache hydrate errors */
@@ -3731,6 +3767,47 @@ function AppInner() {
           n += 1;
         }
         procArray.length = n;
+
+        // Empty body: almost always a host restart / cache blip — NEVER wipe the UI.
+        // Only accept a true empty list after several consecutive empties + manual refresh.
+        if (n === 0) {
+          emptyStatusStreakRef.current += 1;
+          netFailCountRef.current = 0;
+          setConnectionOk(true);
+          lastSyncAtRef.current = Date.now();
+          setStatusLoaded(true);
+          const hadLocal =
+            processesLenRef.current > 0 ||
+            (statusFpRef.current && statusFpRef.current !== '0');
+          const allowEmptyWipe =
+            isManualRefresh && emptyStatusStreakRef.current >= 2 && !hadLocal;
+          if (!allowEmptyWipe) {
+            // Rehydrate from L1/L2 if React state was already empty
+            if (!processesLenRef.current) {
+              try {
+                const peek = cachePeek('status', '');
+                if (
+                  cacheUsable(peek) &&
+                  Array.isArray(peek.data) &&
+                  peek.data.length &&
+                  mountedRef.current
+                ) {
+                  setProcesses((prev) =>
+                    prev?.length ? prev : mergeProcessList([], peek.data)
+                  );
+                  processesLenRef.current = peek.data.length;
+                }
+              } catch {
+                /* ignore */
+              }
+            }
+            statusInflightRef._lastChanged = false;
+            return false;
+          }
+        } else {
+          emptyStatusStreakRef.current = 0;
+        }
+
         // Stable order so the list doesn't jump every poll
         procArray.sort((a, b) => {
           if (a.is_bot !== b.is_bot) return a.is_bot ? -1 : 1;
@@ -3749,7 +3826,7 @@ function AppInner() {
         });
 
         // Skip alerts on first successful snapshot after login
-        if (statusAlertsRef.current && prevStatusReadyRef.current) {
+        if (statusAlertsRef.current && prevStatusReadyRef.current && n > 0) {
           const prev = prevStatusRef.current;
           const drops = [];
           const ups = [];
@@ -3770,8 +3847,12 @@ function AppInner() {
             showBanner(`${ups.length} processus en ligne`, 'ok');
           }
         }
-        prevStatusRef.current = Object.fromEntries(procArray.map((p) => [p.id, p.status]));
-        prevStatusReadyRef.current = true;
+        if (n > 0) {
+          prevStatusRef.current = Object.fromEntries(
+            procArray.map((p) => [p.id, p.status])
+          );
+          prevStatusReadyRef.current = true;
+        }
 
         if (isManualRefresh) animateLayout();
         // Fingerprint for smart poll (status/pid only)
@@ -3779,20 +3860,18 @@ function AppInner() {
         const statusChanged = nextFp !== statusFpRef.current;
         statusFpRef.current = nextFp;
         // Skip setState when snapshot unchanged — avoids full list re-render every poll
-        if (statusChanged || isManualRefresh || !statusFpRef.current) {
-          setProcesses((prev) => mergeProcessList(prev, procArray));
-        } else {
-          // Fingerprint matched — still merge in case object identity needed once
+        if (statusChanged || isManualRefresh || !processesLenRef.current) {
           setProcesses((prev) => {
             const merged = mergeProcessList(prev, procArray);
-            return merged === prev ? prev : merged;
+            processesLenRef.current = merged?.length || 0;
+            return merged;
           });
         }
         setStatusLoaded((prev) => (prev ? prev : true));
         netFailCountRef.current = 0;
         // Always clear offline banner on a real /status success
         setConnectionOk(true);
-        if (statusChanged || isManualRefresh) {
+        if ((statusChanged || isManualRefresh) && n > 0) {
           cacheSet('status', '', procArray).catch(() => {});
         }
         const ms = Date.now() - t0;
@@ -3809,7 +3888,7 @@ function AppInner() {
         // Expose change flag for adaptive loop via ref
         statusInflightRef._lastChanged = statusChanged;
       } catch (error) {
-        // Offline / failed poll: keep last good snapshot from cache if UI empty
+        // Offline / failed poll: always keep last good snapshot (never flash empty)
         try {
           const peek = cachePeek('status', '');
           if (
@@ -3818,10 +3897,16 @@ function AppInner() {
             peek.data.length &&
             mountedRef.current
           ) {
-            setProcesses((prev) =>
-              prev?.length ? prev : mergeProcessList([], peek.data)
-            );
+            setProcesses((prev) => {
+              if (prev?.length) return prev;
+              processesLenRef.current = peek.data.length;
+              return mergeProcessList([], peek.data);
+            });
             setStatusLoaded(true);
+            // Soft-online while we still have a fresh-enough snapshot
+            if (peek.ageMs != null && peek.ageMs < 120_000) {
+              setConnectionOk(true);
+            }
           }
         } catch {
           /* ignore */
@@ -3984,14 +4069,38 @@ function AppInner() {
   }, [notifyFeed]);
 
   const fetchNotifications = useCallback(
-    async ({ silent = true } = {}) => {
+    async ({ silent = true, force = false } = {}) => {
       notifyInflightRef._lastChanged = false;
       const token = authTokenRef.current;
       if (!token) return false;
-      if (silent && notifyInflightRef.current) return false;
+      // force=true on resume: don't drop behind a stuck inflight poll
+      if (silent && !force && notifyInflightRef.current) return false;
       notifyInflightRef.current = true;
       if (!silent && mountedRef.current) setNotifyLoading(true);
       try {
+        // Paint cache immediately if feed empty (resume / cold tab)
+        if (!notifyFeedRef.current?.length) {
+          try {
+            const peek = cachePeek('notify', '');
+            if (
+              cacheUsable(peek) &&
+              Array.isArray(peek.data) &&
+              peek.data.length &&
+              mountedRef.current
+            ) {
+              setNotifyFeed(peek.data);
+              notifyFeedRef.current = peek.data;
+              if (knownNotifyIdsRef.current.size === 0) {
+                knownNotifyIdsRef.current = new Set(
+                  peek.data.map((it) => it?.id).filter(Boolean)
+                );
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+
         const role = userRoleRef.current || '';
         // Radio logins always use their station filter option + ALL central of what they can see
         let stationParam = notifyStation;
@@ -4011,7 +4120,7 @@ function AppInner() {
             : '';
         const data = await apiFetch(
           `/notifications?limit=200${typeQ}${stQ}`,
-          { token, timeoutMs: 10000 }
+          { token, timeoutMs: 12000 }
         );
         if (!mountedRef.current) return false;
         // Any live API success keeps the online pill (not only /status)
@@ -4021,15 +4130,18 @@ function AppInner() {
         // O(1) edge fingerprint — avoid O(n) title/body walk every poll
         const fp = fingerprintNotify(items);
         const changed = fp !== (notifyInflightRef._fp || '');
-        if (changed) {
+        // Always paint when force, first load, or feed was empty
+        const feedEmpty = !notifyFeedRef.current?.length;
+        const shouldPaint = changed || force || (items.length > 0 && feedEmpty);
+        if (shouldPaint) {
           notifyInflightRef._fp = fp;
           setNotifyFeed(items);
           notifyFeedRef.current = items;
-          cacheSet('notify', '', items).catch(() => {});
-        } else if (!items.length && !notifyFeedRef.current?.length) {
-          /* still empty */
+          if (items.length) {
+            cacheSet('notify', '', items).catch(() => {});
+          }
         }
-        notifyInflightRef._lastChanged = changed;
+        notifyInflightRef._lastChanged = changed || (force && items.length > 0);
 
         const lastRead = notifyLastReadRef.current || 0;
         const unread = items.filter((it) => Number(it.ts) > lastRead).length;
@@ -4043,43 +4155,87 @@ function AppInner() {
         // In-app banner for brand-new alerts while app is open
         if (statusAlertsRef.current && knownNotifyIdsRef.current.size > 0) {
           const fresh = items.filter(
-            (it) => it.id && !knownNotifyIdsRef.current.has(it.id) && Number(it.ts) > lastRead
+            (it) =>
+              it.id &&
+              !knownNotifyIdsRef.current.has(it.id) &&
+              Number(it.ts) > lastRead
           );
           if (fresh.length === 1) {
             showBanner(fresh[0].title || 'Nouvelle notification', 'warn');
             lightVibrate();
-            // Local OS banner when: Expo Go, or no remote Expo token (local-feed mode).
-            // Always show for test_push so admin tests work without FCM/APNs.
+            // Local OS banner: Expo Go, no remote push, critical types, or active foreground.
+            // Remote FCM/APNs is often missing — never rely on it alone for in-app alerts.
+            const kind = String(fresh[0].type || 'alert');
             const forceLocal =
               IS_EXPO_GO ||
               !pushOkRef.current ||
-              fresh[0].type === 'admin' ||
+              kind === 'admin' ||
+              kind === 'alert' ||
+              kind === 'status' ||
+              kind === 'system' ||
               (fresh[0].title || '').includes('Test push') ||
-              (fresh[0].title || '').includes('🔔');
+              (fresh[0].title || '').includes('🔔') ||
+              appStateRef.current === 'active';
             if (forceLocal) {
               presentLocalOsNotification(
                 fresh[0].title || 'Commander PRO',
                 fresh[0].body || fresh[0].title || '',
-                { kind: fresh[0].type || 'alert', id: fresh[0].id }
+                { kind, id: fresh[0].id }
               );
             }
           } else if (fresh.length > 1) {
             showBanner(`${fresh.length} nouvelles notifications`, 'warn');
             lightVibrate();
-            if (IS_EXPO_GO || !pushOkRef.current) {
-              presentLocalOsNotification(
-                'Commander PRO',
-                `${fresh.length} nouvelles notifications`,
-                { kind: 'alert_batch', count: fresh.length }
-              );
-            }
+            // Batch: always surface locally so badges aren't the only signal
+            presentLocalOsNotification(
+              'Commander PRO',
+              `${fresh.length} nouvelles notifications`,
+              { kind: 'alert_batch', count: fresh.length }
+            );
           }
+        } else if (
+          statusAlertsRef.current &&
+          knownNotifyIdsRef.current.size === 0 &&
+          items.length > 0
+        ) {
+          // First successful snapshot after cold start — seed only, no spam
         }
-        knownNotifyIdsRef.current = new Set(items.map((it) => it.id).filter(Boolean));
+        // Merge known ids (don't shrink when filtered views return a subset)
+        const nextKnown = new Set(knownNotifyIdsRef.current);
+        for (let i = 0; i < items.length; i += 1) {
+          if (items[i]?.id) nextKnown.add(items[i].id);
+        }
+        // Bound memory (keep newest ~800)
+        if (nextKnown.size > 900) {
+          const keep = items
+            .map((it) => it?.id)
+            .filter(Boolean)
+            .slice(0, 800);
+          knownNotifyIdsRef.current = new Set(keep);
+        } else {
+          knownNotifyIdsRef.current = nextKnown;
+        }
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
           handleLogout();
           return false;
+        }
+        // Failed poll: keep cached feed painted (never blank the Alerts tab)
+        if (!notifyFeedRef.current?.length) {
+          try {
+            const peek = cachePeek('notify', '');
+            if (
+              cacheUsable(peek) &&
+              Array.isArray(peek.data) &&
+              peek.data.length &&
+              mountedRef.current
+            ) {
+              setNotifyFeed(peek.data);
+              notifyFeedRef.current = peek.data;
+            }
+          } catch {
+            /* ignore */
+          }
         }
         if (!silent) console.warn('Fetch notifications failed', error.message);
         notifyInflightRef._lastChanged = false;
@@ -5956,6 +6112,34 @@ function AppInner() {
   const logsFpRef = useRef('');
   const logsInflightRef = useRef(false);
 
+  /** Stable content keys so sliding log windows don't remount every row. */
+  const normalizeLogRows = useCallback((raw) => {
+    const next = [];
+    const seen = new Map();
+    for (let i = 0; i < raw.length; i += 1) {
+      const row = raw[i];
+      let text = '';
+      let type = 'info';
+      if (typeof row === 'string') {
+        text = row;
+      } else if (row && typeof row === 'object') {
+        text = String(row.text ?? row.line ?? row.msg ?? '');
+        type = String(row.type || 'info');
+      }
+      if (!text) continue;
+      const base = `${type}\0${text}`;
+      const n = (seen.get(base) || 0) + 1;
+      seen.set(base, n);
+      next.push({
+        text,
+        type,
+        // Content-stable id (survives poll window slides better than index keys)
+        _id: `${base.length}:${text.length}:${type}:${text.slice(0, 28)}:${text.slice(-20)}#${n}`,
+      });
+    }
+    return next;
+  }, []);
+
   const fetchLogs = useCallback(
     async (processId) => {
       const token = authTokenRef.current;
@@ -5969,22 +6153,22 @@ function AppInner() {
         );
         if (!mountedRef.current) return false;
         const raw = Array.isArray(data) ? data : [];
-        // Normalize API rows (single pass, no filter alloc when empty)
-        const next = [];
-        for (let i = 0; i < raw.length; i += 1) {
-          const row = raw[i];
-          if (typeof row === 'string') {
-            if (row) next.push({ text: row, type: 'info' });
-          } else if (row && typeof row === 'object') {
-            const text = String(row.text ?? row.line ?? row.msg ?? '');
-            if (text) next.push({ text, type: String(row.type || 'info') });
-          }
-        }
+        const next = normalizeLogRows(raw);
         const fp = fingerprintLogs(next);
         const changed = fp !== logsFpRef.current;
         if (changed) {
           logsFpRef.current = fp;
-          setLiveLogs(next);
+          // Never remount the list mid-gesture — that causes the up/down fight
+          if (terminalDraggingRef.current) {
+            pendingLogsRef.current = next;
+          } else {
+            pendingLogsRef.current = null;
+            setLiveLogs(next);
+            // Only request stick when user is already following the live tail
+            if (terminalNearBottomRef.current) {
+              terminalNeedStickRef.current = true;
+            }
+          }
         }
         return changed;
       } catch (error) {
@@ -5993,7 +6177,13 @@ function AppInner() {
           setLiveLogs((prev) => {
             const msg = error.message || 'Log fetch failed';
             if (prev.length === 1 && prev[0]?.text === `⚠️ ${msg}`) return prev;
-            return [{ text: `⚠️ ${msg}`, type: 'error' }];
+            return [
+              {
+                text: `⚠️ ${msg}`,
+                type: 'error',
+                _id: `err:${msg}`,
+              },
+            ];
           });
         }
         return false;
@@ -6001,7 +6191,7 @@ function AppInner() {
         logsInflightRef.current = false;
       }
     },
-    [handleLogout]
+    [handleLogout, normalizeLogRows]
   );
 
   const openTerminal = useCallback(
@@ -6011,6 +6201,9 @@ function AppInner() {
         return;
       }
       logsFpRef.current = '';
+      terminalNearBottomRef.current = true;
+      terminalDraggingRef.current = false;
+      terminalNeedStickRef.current = true;
       setSelectedProcess(process);
       setLiveLogs([]);
       setCommandInput('');
@@ -6022,6 +6215,10 @@ function AppInner() {
 
   const closeTerminal = useCallback(() => {
     logsFpRef.current = '';
+    terminalDraggingRef.current = false;
+    terminalNeedStickRef.current = false;
+    terminalNearBottomRef.current = true;
+    pendingLogsRef.current = null;
     setTerminalVisible(false);
     setSelectedProcess(null);
     setLiveLogs([]);
@@ -6051,6 +6248,9 @@ function AppInner() {
 
       if (clearInput) setCommandInput('');
       setSendingConsole(true);
+      // Sending a command → jump back to live tail
+      terminalNearBottomRef.current = true;
+      terminalNeedStickRef.current = true;
       setLiveLogs((prev) => [
         ...prev,
         {
@@ -6058,6 +6258,7 @@ function AppInner() {
             ? `📱 [ENVOYÉ] : ${textToSend}  (téléchargement si besoin…)`
             : `📱 [ENVOYÉ] : ${textToSend}`,
           type: 'admin',
+          _id: `sent:${Date.now()}:${textToSend.slice(0, 40)}`,
         },
       ]);
       pushActionLog(`Console ${selectedProcess.id}: ${textToSend}`);
@@ -6291,6 +6492,30 @@ function AppInner() {
       if (wasAway && nowActive) {
         clearBgPoll();
         netFailCountRef.current = 0;
+        emptyStatusStreakRef.current = 0;
+        // Instant cache paint BEFORE network — main page must never flash empty
+        try {
+          const st = cachePeek('status', '');
+          if (
+            cacheUsable(st) &&
+            Array.isArray(st.data) &&
+            st.data.length
+          ) {
+            setProcesses((prev) => {
+              if (prev?.length) return prev;
+              processesLenRef.current = st.data.length;
+              return mergeProcessList([], st.data);
+            });
+            setStatusLoaded(true);
+            setConnectionOk(true);
+          }
+          const nf = cachePeek('notify', '');
+          if (cacheUsable(nf) && Array.isArray(nf.data) && nf.data.length) {
+            setNotifyFeed((prev) => (prev?.length ? prev : nf.data));
+          }
+        } catch {
+          /* ignore */
+        }
         // Boost adaptive polls after return (both platforms)
         try {
           statusBudgetRef.current?.boost?.();
@@ -6300,8 +6525,13 @@ function AppInner() {
           /* ignore */
         }
         if (authTokenRef.current) {
+          // Unstick any hung inflight so resume always gets a live snapshot
+          statusInflightRef.current = false;
+          notifyInflightRef.current = false;
+          streamsInflightRef.current = false;
           fetchStatus(false);
-          fetchNotifications({ silent: true });
+          fetchNotifications({ silent: true, force: true });
+          // streams refreshed by smart loop after budget.boost() above
           fetchChatChannels();
           if (userRoleRef.current === 'OWNER') fetchAdmin();
           // Resume audio session if user was listening (iOS often suspends AV)
@@ -6314,6 +6544,8 @@ function AppInner() {
         }
         // Audio resume on active is handled by the dedicated AppState+listen effect below
       } else if (nowBg && authTokenRef.current) {
+        // Persist L1 → disk so cold relaunch after kill still has data
+        cacheFlush().catch(() => {});
         // True background only (not iOS inactive / Control Center)
         if (!IS_EXPO_GO) {
           pollNotifyOnceInBackground().catch(() => {});
@@ -6327,6 +6559,8 @@ function AppInner() {
         }
       } else if (next === 'inactive') {
         // iOS Control Center — leave foreground polls alone (smartPoll slows itself)
+        // Still flush cache: user may swipe-kill from app switcher next
+        cacheFlush().catch(() => {});
         clearBgPoll();
       }
     };
@@ -7248,10 +7482,72 @@ function AppInner() {
     if (item.type === 'info') color = '#38bdf8';
     if (item.type === 'admin') color = '#c084fc';
     return (
-      <Text style={[styles.logText, { color }]} selectable numberOfLines={8}>
+      <Text style={[styles.logText, { color }]} selectable numberOfLines={12}>
         {item.text}
       </Text>
     );
+  }, []);
+
+  /**
+   * Inverted terminal data: newest first in the array → visual bottom.
+   * Avoids scrollToEnd thrash when polls append lines.
+   */
+  const terminalLogData = useMemo(() => {
+    if (!liveLogs?.length) return liveLogs;
+    // Single reverse copy per liveLogs identity change
+    const rev = liveLogs.slice().reverse();
+    return rev;
+  }, [liveLogs]);
+
+  const terminalLogKeyExtractor = useCallback(
+    (item, index) => item?._id || `log-${index}-${(item?.text || '').length}`,
+    []
+  );
+
+  const flushPendingTerminalLogs = useCallback(() => {
+    const pending = pendingLogsRef.current;
+    if (!pending) return;
+    pendingLogsRef.current = null;
+    setLiveLogs(pending);
+    if (terminalNearBottomRef.current) {
+      terminalNeedStickRef.current = true;
+    }
+  }, []);
+
+  const updateTerminalNearBottom = useCallback((e) => {
+    try {
+      const { contentOffset } = e.nativeEvent;
+      // Inverted list: offset ~0 means visual bottom (newest lines)
+      const y = contentOffset?.y ?? 0;
+      // Hysteresis so small layout jitter doesn't re-arm stick while reading history
+      if (y <= 48) {
+        terminalNearBottomRef.current = true;
+      } else if (y > 120) {
+        terminalNearBottomRef.current = false;
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const stickTerminalIfNeeded = useCallback(() => {
+    if (!terminalNeedStickRef.current) return;
+    if (terminalDraggingRef.current) return;
+    if (!terminalNearBottomRef.current) {
+      terminalNeedStickRef.current = false;
+      return;
+    }
+    terminalNeedStickRef.current = false;
+    // Inverted: offset 0 = newest. Only nudge if we drifted slightly.
+    try {
+      flatListRef.current?.scrollToOffset?.({ offset: 0, animated: false });
+    } catch {
+      try {
+        flatListRef.current?.scrollToEnd?.({ animated: false });
+      } catch {
+        /* ignore */
+      }
+    }
   }, []);
 
   const onListenFromCard = useCallback(
@@ -10996,46 +11292,55 @@ function AppInner() {
               <View style={styles.consoleArea}>
                 <FlatList
                   ref={flatListRef}
-                  data={liveLogs}
-                  keyExtractor={(item, index) => `log-${index}-${(item.text || '').length}`}
+                  // Inverted + newest-first: live tail stays put without scrollToEnd thrash
+                  inverted
+                  data={terminalLogData}
+                  keyExtractor={terminalLogKeyExtractor}
                   renderItem={renderLogItem}
                   {...listPerfProps}
-                  initialNumToRender={20}
-                  maintainVisibleContentPosition={
-                    IS_IOS
-                      ? { minIndexForVisible: 0, autoscrollToTopThreshold: 24 }
-                      : undefined
-                  }
-                  onScroll={(e) => {
-                    try {
-                      const { contentOffset, contentSize, layoutMeasurement } =
-                        e.nativeEvent;
-                      const dist =
-                        contentSize.height -
-                        layoutMeasurement.height -
-                        contentOffset.y;
-                      terminalNearBottomRef.current = dist < 100;
-                    } catch {
-                      /* ignore */
-                    }
+                  initialNumToRender={16}
+                  maxToRenderPerBatch={8}
+                  windowSize={7}
+                  // NEVER use maintainVisibleContentPosition here — it fights inverted
+                  // + live polls and causes the up/down scroll glitch.
+                  maintainVisibleContentPosition={undefined}
+                  onScrollBeginDrag={() => {
+                    terminalDraggingRef.current = true;
+                    terminalNeedStickRef.current = false;
                   }}
-                  scrollEventThrottle={48}
+                  onScrollEndDrag={(e) => {
+                    terminalDraggingRef.current = false;
+                    updateTerminalNearBottom(e);
+                    // Apply any poll that arrived mid-gesture (no mid-scroll remount)
+                    flushPendingTerminalLogs();
+                  }}
+                  onMomentumScrollBegin={() => {
+                    terminalDraggingRef.current = true;
+                  }}
+                  onMomentumScrollEnd={(e) => {
+                    terminalDraggingRef.current = false;
+                    updateTerminalNearBottom(e);
+                    flushPendingTerminalLogs();
+                  }}
+                  onScroll={updateTerminalNearBottom}
+                  scrollEventThrottle={16}
                   onContentSizeChange={() => {
-                    // Only stick to bottom if user is already near the end
-                    // (fixes jump/glitch when scrolling up to read older logs)
-                    if (!terminalNearBottomRef.current) return;
-                    try {
-                      flatListRef.current?.scrollToEnd({ animated: false });
-                    } catch {
-                      /* ignore */
-                    }
+                    // Only snap to live tail when user is following + we have new lines
+                    stickTerminalIfNeeded();
+                  }}
+                  onLayout={() => {
+                    // First open only
+                    if (terminalNeedStickRef.current) stickTerminalIfNeeded();
                   }}
                   ListEmptyComponent={
-                    <Text style={styles.logText}>
-                      {selectedProcess?.status === 'RUNNING'
-                        ? 'No logs yet. In Batch Manager: Kill then Start this process so logs stream here.'
-                        : 'No logs (process stopped). Start it from Batch Manager first.'}
-                    </Text>
+                    // inverted list flips empty UI — un-flip so text reads normally
+                    <View style={{ transform: [{ scaleY: -1 }], padding: 12 }}>
+                      <Text style={styles.logText}>
+                        {selectedProcess?.status === 'RUNNING'
+                          ? 'No logs yet. In Batch Manager: Kill then Start this process so logs stream here.'
+                          : 'No logs (process stopped). Start it from Batch Manager first.'}
+                      </Text>
+                    </View>
                   }
                   keyboardShouldPersistTaps="handled"
                 />

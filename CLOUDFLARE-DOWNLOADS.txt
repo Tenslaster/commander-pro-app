@@ -65,3 +65,13 @@ Notes
   - This PC may fail HTTPS to crew.kingdom.forum (local TLS/antivirus) while
     phones outside still work. Test downloads from a phone, not only from PC.
   - Config was optimized 2026-07-23: longer timeouts for APK/IPA + streams.
+
+Pulse Music download links
+--------------------------
+  https://crew.kingdom.forum/download/pulse
+  https://crew.kingdom.forum/download/pulse/apk
+  https://crew.kingdom.forum/download/pulse/ipa
+  Local files: PulseVault\dist\ (latest pulse-*.ipa / *.apk)
+  Batch Manager slot: Pulse Downloads (PulseVault\PulseDownloads.bat)
+  Needs cloudflared path ^/download -> :8787 (and download server running)
+
