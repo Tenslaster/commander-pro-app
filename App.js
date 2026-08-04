@@ -160,7 +160,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.4.9';
+const APP_VERSION = '1.5.0';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -5988,28 +5988,63 @@ function AppInner() {
         Alert.alert('Erreur isolation', 'Le serveur a renvoyé une autre radio. Annulé.');
         return;
       }
-      if (mountedRef.current && data) {
+      if (mountedRef.current) {
+        // Prefer what we sent for rank/ban/bank so a stale server body cannot
+        // snap the UI back to the previous values (legacy JSON read bug).
+        const serverRank = (data?.rank || rankNorm || 'guest').toLowerCase();
+        const finalRank =
+          data?.saved === false ? serverRank : rankNorm || serverRank;
+        const finalBanned =
+          data?.saved === false ? !!data?.banned : !!userEditBanned;
+        const finalBank =
+          data?.saved === false
+            ? Number(data?.bank ?? bankVal) || 0
+            : bankVal;
         const stamped = {
-          ...data,
+          ...(previous || {}),
+          ...(data && typeof data === 'object' ? data : {}),
           station,
-          id: data.id || `${station}:${data.username || username}`,
-          rank: (data.rank || 'guest').toLowerCase(),
-          rank_level:
-            typeof data.rank_level === 'number'
-              ? data.rank_level
-              : RANK_LEVELS[(data.rank || 'guest').toLowerCase()] ?? 0,
+          username,
+          id:
+            (data && data.id) ||
+            previous?.id ||
+            `${station}:${username}`,
+          rank: finalRank,
+          rank_level: RANK_LEVELS[finalRank] ?? data?.rank_level ?? 0,
+          banned: finalBanned,
+          bank: finalBank,
+          saved: true,
         };
         setSelectedStationUser(stamped);
         setUserEditRank(stamped.rank);
         setUserEditBank(String(stamped.bank ?? 0));
         setUserEditBanned(!!stamped.banned);
-        const patch = (prev) =>
-          prev.map((x) =>
-            (x.id || `${x.station}:${x.username}`) === stamped.id
-              ? { ...x, ...stamped }
-              : x
-          );
-        setUsersList(patch);
+        const patch = (prev) => {
+          if (!Array.isArray(prev)) return prev;
+          const id = stamped.id;
+          let found = false;
+          const next = prev.map((x) => {
+            const xid = x.id || `${x.station}:${x.username}`;
+            if (
+              xid === id ||
+              (x.username === username &&
+                normalizeStationId(x.station) === station)
+            ) {
+              found = true;
+              return { ...x, ...stamped };
+            }
+            return x;
+          });
+          return found ? next : [stamped, ...next];
+        };
+        setUsersList((prev) => {
+          const next = patch(prev);
+          // Client SQLite/AsyncStorage cache — avoid rank snap-back on tab switch
+          if (Array.isArray(next) && next.length) {
+            cacheSet('users', station, next).catch(() => {});
+          }
+          return next;
+        });
         setUsersSearchHits((prev) => (prev ? patch(prev) : prev));
       }
       pushActionLog(

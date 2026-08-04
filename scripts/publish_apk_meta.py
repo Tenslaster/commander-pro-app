@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APK = ROOT / "dist" / "apk" / "CommanderPro.apk"
 IPA = ROOT / "dist" / "ipa" / "CommanderPro.ipa"
 VERSIONS = ROOT / "dist" / "versions.json"
-FALLBACK = "1.4.2"
+FALLBACK = "1.5.0"
 
 
 def read_app_json_version() -> str:
