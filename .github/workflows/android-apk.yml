@@ -6,11 +6,20 @@ name: Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, master]
+
+# Least privilege for GITHUB_TOKEN (CodeQL actions/missing-workflow-permissions)
+permissions:
+  contents: read
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
 
     steps:
       - uses: actions/checkout@v7
