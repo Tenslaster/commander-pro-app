@@ -160,7 +160,7 @@ const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
 /** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
  *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
  */
-const APP_VERSION = '1.5.4';
+const APP_VERSION = '1.5.5';
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
 const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
@@ -519,6 +519,7 @@ const refreshControlProps = {
 
 const ROLE_COLORS = {
   OWNER: '#c084fc',
+  NONE: '#94a3b8',
   RADIO1: '#38bdf8',
   RADIO2: '#34d399',
   RADIO3: '#fbbf24',
@@ -568,7 +569,9 @@ const ALL_KNOWN_CMDS = [...KNOWN_RADIO_CMDS, ...KNOWN_SYSTEM_CMDS];
 function isHomeRadioCmd(cmdId, homeRole) {
   const id = String(cmdId || '').toUpperCase();
   const home = String(homeRole || '').toUpperCase();
-  if (!id || !home) return false;
+  // NONE / unlinked accounts have no automatic radio MAIN/BOT
+  if (!id || !home || home === 'NONE' || home === 'OWNER') return false;
+  if (!STATION_IDS.includes(home)) return false;
   return id === home || id.startsWith(`${home}_`);
 }
 
@@ -2421,6 +2424,7 @@ function AppInner() {
   const [managePassword, setManagePassword] = useState('');
   const [manageLevel, setManageLevel] = useState('operator');
   const [managePerms, setManagePerms] = useState(() => [...APP_LEVEL_PRESETS.operator]);
+  /** Home radio for new account; OWNER may set 'NONE' = no radio (CMD-only). */
   const [manageStation, setManageStation] = useState('RADIO1');
   const [manageCreating, setManageCreating] = useState(false);
   const [manageEditUser, setManageEditUser] = useState(null);
@@ -2597,6 +2601,11 @@ function AppInner() {
   // Gestion: OWNER or app users with manage_users (their radio only on API)
   const canManageAppUsers =
     isOwner || isMasterLogin || hasPerm('manage_users');
+  /**
+   * Extra Batch Manager CMDs (CLOUDFLARE, other radios…): real OWNER only.
+   * Radio managers keep Gestion (create logins on their radio) but never see/edit CMDs.
+   */
+  const canManageExtraCmds = isOwner;
   // Process control — umbrella `control` OR granular start/stop/restart
   const canStartRadio =
     isOwner ||
@@ -2857,14 +2866,15 @@ function AppInner() {
         next.push('security');
       }
       setManageEditPerms(next);
+      // CMD slots: OWNER only — radio managers never load/edit extra_cmds
       setManageEditExtraCmds(
-        Array.isArray(u.extra_cmds)
+        canManageExtraCmds && Array.isArray(u.extra_cmds)
           ? u.extra_cmds.map((c) => String(c || '').toUpperCase()).filter(Boolean)
           : []
       );
       setManageEditPassword('');
     },
-    [normalizeManagePerms, canGrantSecurity]
+    [normalizeManagePerms, canGrantSecurity, canManageExtraCmds]
   );
 
   /**
@@ -3265,10 +3275,10 @@ function AppInner() {
     [handleLogout, noteUnauthorized, t]
   );
 
-  /** Full Batch Manager bat/slot list for Gestion (must run after handleAuthFailure). */
+  /** Full Batch Manager bat list — OWNER only (CMD Gestion). */
   const fetchBmProcessIds = useCallback(async () => {
     const token = authTokenRef.current;
-    if (!token || !canManageAppUsers) return;
+    if (!token || !canManageExtraCmds) return;
     try {
       const data = await apiFetch('/process_ids', { token, timeoutMs: 12000 });
       if (!mountedRef.current) return;
@@ -3282,7 +3292,7 @@ function AppInner() {
       if (error?.code === 'UNAUTHORIZED') handleAuthFailure('api');
       // Keep previous catalog on failure
     }
-  }, [canManageAppUsers, handleAuthFailure]);
+  }, [canManageExtraCmds, handleAuthFailure]);
 
   /**
    * Register this APK/IPA with the API.
@@ -5898,13 +5908,28 @@ function AppInner() {
       Alert.alert(t('manage.create'), t('manage.needPerm'));
       return;
     }
-    const role = isOwner
-      ? manageStation
+    // OWNER: RADIO1..10 or NONE (unlinked). Managers: always their radio.
+    let role = isOwner
+      ? String(manageStation || '').toUpperCase()
       : STATION_IDS.includes(userRole)
         ? userRole
         : manageStation;
-    if (!STATION_IDS.includes(role)) {
+    if (role === 'UNLINKED' || role === 'FREE' || role === 'NO_RADIO') role = 'NONE';
+    const unlinked = role === 'NONE';
+    if (unlinked && !canManageExtraCmds) {
       Alert.alert(t('manage.create'), t('manage.pickStation'));
+      return;
+    }
+    if (!unlinked && !STATION_IDS.includes(role)) {
+      Alert.alert(t('manage.create'), t('manage.pickStation'));
+      return;
+    }
+    // Unlinked account = CMD-only; must pick at least one bat
+    if (
+      unlinked &&
+      (!Array.isArray(manageExtraCmds) || manageExtraCmds.length === 0)
+    ) {
+      Alert.alert(t('manage.create'), t('manage.needCmdUnlinked'));
       return;
     }
     setManageCreating(true);
@@ -5915,10 +5940,15 @@ function AppInner() {
         level: manageLevel === 'custom' ? 'custom' : manageLevel,
         permissions: perms,
         role,
-        station: role,
+        station: unlinked ? 'NONE' : role,
       };
-      // OWNER only: optional extra process slots (CLOUDFLARE, other MAIN/BOT, …)
-      if (isOwner && Array.isArray(manageExtraCmds) && manageExtraCmds.length) {
+      // Big OWNER only: extra BM slots. Required when role is NONE.
+      // Radio managers never send extra_cmds — account stays on their radio only.
+      if (
+        canManageExtraCmds &&
+        Array.isArray(manageExtraCmds) &&
+        manageExtraCmds.length
+      ) {
         body.extra_cmds = manageExtraCmds.map((c) => String(c).toUpperCase());
       }
       const data = await apiFetch('/app_users/create', {
@@ -5967,6 +5997,7 @@ function AppInner() {
     managePermKeysAllowed,
     manageExtraCmds,
     canGrantSecurity,
+    canManageExtraCmds,
     isOwner,
     userRole,
     t,
@@ -5994,10 +6025,13 @@ function AppInner() {
       }
       if (typeof patch?.active === 'boolean') body.active = patch.active;
       if (patch?.display_name != null) body.display_name = patch.display_name;
-      if (patch?.role && STATION_IDS.includes(String(patch.role).toUpperCase())) {
-        body.role = String(patch.role).toUpperCase();
+      // Only big OWNER may reassign radio / CMDs (incl. NONE = unlinked)
+      if (canManageExtraCmds && patch?.role) {
+        let r = String(patch.role).toUpperCase().trim();
+        if (['UNLINKED', 'FREE', 'NO_RADIO', 'NORADIO', ''].includes(r)) r = 'NONE';
+        if (r === 'NONE' || STATION_IDS.includes(r)) body.role = r;
       }
-      if (Array.isArray(patch?.extra_cmds)) {
+      if (canManageExtraCmds && Array.isArray(patch?.extra_cmds)) {
         body.extra_cmds = patch.extra_cmds
           .map((c) => String(c || '').toUpperCase().trim())
           .filter(Boolean);
@@ -6050,7 +6084,7 @@ function AppInner() {
         return null;
       }
     },
-    [handleLogout, showBanner, t]
+    [canManageExtraCmds, handleLogout, showBanner, t]
   );
 
   const saveManageEdit = useCallback(async () => {
@@ -6100,8 +6134,8 @@ function AppInner() {
       if (manageEditPassword && manageEditPassword.length >= 4) {
         patch.password = manageEditPassword;
       }
-      // OWNER can set extra process access (empty array = radio only)
-      if (isOwner) {
+      // Big OWNER only: set extra BM CMDs (empty = home radio only)
+      if (canManageExtraCmds) {
         patch.extra_cmds = (manageEditExtraCmds || []).map((c) =>
           String(c).toUpperCase()
         );
@@ -6128,7 +6162,7 @@ function AppInner() {
     manageEditExtraCmds,
     managePermKeysAllowed,
     canGrantSecurity,
-    isOwner,
+    canManageExtraCmds,
     updateAppLoginUser,
     fetchAppUsers,
     t,
@@ -7705,13 +7739,19 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainTab, usersStation, fetchStationUsers]);
 
-  // Management tab: app login accounts + full BM bat inventory
+  // Management tab: app logins for all managers; BM CMD list only for big OWNER
   useEffect(() => {
     if (mainTab !== 'manage' || !canManageAppUsers) return undefined;
     fetchAppUsers({ silent: false });
-    fetchBmProcessIds();
+    if (canManageExtraCmds) fetchBmProcessIds();
     return undefined;
-  }, [mainTab, canManageAppUsers, fetchAppUsers, fetchBmProcessIds]);
+  }, [
+    mainTab,
+    canManageAppUsers,
+    canManageExtraCmds,
+    fetchAppUsers,
+    fetchBmProcessIds,
+  ]);
 
   // Playlist tab: AutoDJ folder for current station
   useEffect(() => {
@@ -9729,13 +9769,9 @@ function AppInner() {
                   />
                 }
               >
-                {/* Hero — managers are admins of their radio only */}
                 <View style={styles.manageHero}>
                   <Ionicons name="people-circle" size={36} color="#fbbf24" />
                   <Text style={styles.manageHeroTitle}>{t('manage.heroTitle')}</Text>
-                  <Text style={styles.manageHeroSub}>
-                    {isOwner ? t('manage.subtitleOwner') : t('manage.heroRadio')}
-                  </Text>
                   {!isOwner ? (
                     <View style={styles.manageStationLock}>
                       <Ionicons
@@ -9751,9 +9787,6 @@ function AppInner() {
                       >
                         {userRole}
                       </Text>
-                      <Text style={styles.manageStationLockHint}>
-                        {t('manage.subtitleRadio')}
-                      </Text>
                     </View>
                   ) : null}
                 </View>
@@ -9762,6 +9795,26 @@ function AppInner() {
                   <>
                     <Text style={styles.manageFieldLabel}>{t('manage.station')}</Text>
                     <View style={styles.manageRankWrap}>
+                      <Pressable
+                        key="ms-NONE"
+                        onPress={() => setManageStation('NONE')}
+                        style={[
+                          styles.manageRankChip,
+                          manageStation === 'NONE' && {
+                            backgroundColor: 'rgba(251,191,36,0.25)',
+                            borderColor: '#fbbf24',
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.manageRankChipText,
+                            manageStation === 'NONE' && { color: '#fbbf24' },
+                          ]}
+                        >
+                          {t('manage.noRadio')}
+                        </Text>
+                      </Pressable>
                       {STATION_IDS.map((st) => {
                         const active = manageStation === st;
                         const col = ROLE_COLORS[st] || '#38bdf8';
@@ -9807,8 +9860,6 @@ function AppInner() {
                     <Ionicons name="refresh" size={18} color="#94a3b8" />
                   </TouchableOpacity>
                 </View>
-                <Text style={styles.manageOwnerNote}>{t('manage.editHelp')}</Text>
-
                 {appUsersLoading && appUsersList.length === 0 ? (
                   <ActivityIndicator color="#fbbf24" style={{ marginVertical: 24 }} />
                 ) : appUsersList.length === 0 ? (
@@ -9845,7 +9896,9 @@ function AppInner() {
                             </Text>
                             <Text style={styles.manageUserMeta} numberOfLines={1}>
                               <Text style={{ color: col, fontWeight: '800' }}>
-                                {u.role}
+                                {u.role === 'NONE' || !u.role
+                                  ? t('manage.noRadio')
+                                  : u.role}
                               </Text>
                               {' · '}
                               <Text style={{ color: lvCol }}>
@@ -9870,7 +9923,9 @@ function AppInner() {
                             ))
                           )}
                         </View>
-                        {Array.isArray(u.extra_cmds) && u.extra_cmds.length > 0 ? (
+                        {canManageExtraCmds &&
+                        Array.isArray(u.extra_cmds) &&
+                        u.extra_cmds.length > 0 ? (
                           <View style={styles.manageChipWrap}>
                             <Text style={styles.manageExtraCmdsLabel}>
                               {t('manage.extraCmds')}:
@@ -9969,7 +10024,6 @@ function AppInner() {
                 {manageShowCreate ? (
                   <View style={styles.manageCard}>
                     <Text style={styles.manageCardTitle}>{t('manage.createApp')}</Text>
-                    <Text style={styles.manageOwnerNote}>{t('manage.levelHelp')}</Text>
                     <Text style={styles.manageFieldLabel}>{t('manage.username')}</Text>
                     <TextInput
                       style={styles.manageInput}
@@ -10141,22 +10195,17 @@ function AppInner() {
                       );
                     })}
 
-                    {isOwner ? (
+                    {canManageExtraCmds ? (
                       <View style={styles.manageExtraCmdsBlock}>
                         <Text style={styles.manageFieldLabel}>
-                          {t('manage.extraCmds')} · {manageCmdCatalog.length}
-                        </Text>
-                        <Text style={styles.manageOwnerNote}>
-                          {t('manage.extraCmdsHelp', {
-                            station: manageStation || 'RADIO#',
-                          })}
+                          {t('manage.extraCmds')}
+                          {manageCmdCatalog.length
+                            ? ` · ${manageCmdCatalog.length}`
+                            : ''}
                         </Text>
                         <View style={styles.managePermToolbar}>
                           <Text style={styles.manageCmdSectionTitle}>
                             {t('manage.extraCmdsPick')}
-                            {bmProcessList.length
-                              ? ` · BM ${bmProcessList.length}`
-                              : ''}
                           </Text>
                           <View style={{ flexDirection: 'row', gap: 8 }}>
                             <Pressable
@@ -10306,7 +10355,10 @@ function AppInner() {
                           : t('manage.editRights')}
                       </Text>
                       <Text style={styles.terminalSub} numberOfLines={1}>
-                        {manageEditUser?.username} · {manageEditUser?.role}
+                        {manageEditUser?.username} ·{' '}
+                        {manageEditUser?.role === 'NONE'
+                          ? t('manage.noRadio')
+                          : manageEditUser?.role}
                         {!manageEditPwdOnly
                           ? ` · ${manageEditPerms.filter((p) => p !== 'security').length} ${t('manage.permCount')}`
                           : ''}
@@ -10333,9 +10385,6 @@ function AppInner() {
                   >
                     {!manageEditPwdOnly ? (
                       <>
-                        <Text style={styles.manageOwnerNote}>
-                          {t('manage.editHelp')}
-                        </Text>
                         <Text style={styles.manageFieldLabel}>
                           {t('manage.presets')}
                         </Text>
@@ -10450,22 +10499,17 @@ function AppInner() {
                           );
                         })}
 
-                        {isOwner && manageEditUser?.role ? (
+                        {canManageExtraCmds && manageEditUser?.role ? (
                           <View style={styles.manageExtraCmdsBlock}>
                             <Text style={styles.manageFieldLabel}>
-                              {t('manage.extraCmds')} · {manageCmdCatalog.length}
-                            </Text>
-                            <Text style={styles.manageOwnerNote}>
-                              {t('manage.extraCmdsHelp', {
-                                station: manageEditUser.role,
-                              })}
+                              {t('manage.extraCmds')}
+                              {manageCmdCatalog.length
+                                ? ` · ${manageCmdCatalog.length}`
+                                : ''}
                             </Text>
                             <View style={styles.managePermToolbar}>
                               <Text style={styles.manageCmdSectionTitle}>
                                 {t('manage.extraCmdsPick')}
-                                {bmProcessList.length
-                                  ? ` · BM ${bmProcessList.length}`
-                                  : ''}
                               </Text>
                               <View style={{ flexDirection: 'row', gap: 8 }}>
                                 <Pressable
@@ -11077,7 +11121,7 @@ function AppInner() {
                 onPress={() => {
                   switchMainTab('manage');
                   fetchAppUsers({ silent: true });
-                  fetchBmProcessIds();
+                  if (canManageExtraCmds) fetchBmProcessIds();
                 }}
               />
             ) : null}
