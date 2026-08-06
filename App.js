@@ -266,6 +266,21 @@ const SESSION_ROLE_KEY = 'session_role';
 const SESSION_USER_KEY = 'session_username';
 const SESSION_LEVEL_KEY = 'session_level';
 const SESSION_PERMS_KEY = 'session_permissions';
+const SESSION_EXTRA_CMDS_KEY = 'session_extra_cmds';
+/** Common system CMD ids always offered in Gestion (plus live process list). */
+const KNOWN_SYSTEM_CMDS = [
+  'CLOUDFLARE',
+  'ICECAST',
+  'Wi-Fi',
+  'CommanderDownloads',
+  'IPhoneApp',
+  'PULSE',
+  'PULSEGO',
+  'CASINO',
+  'CASINOGO',
+  'BENCH',
+  'T1',
+];
 const SESSION_MASTER_KEY = 'session_is_master';
 const BIOMETRIC_KEY = 'biometric_enabled';
 /** Granular app-login permissions (not Highrise ranks) */
@@ -2360,6 +2375,10 @@ function AppInner() {
   // Management tab — APP login accounts (not Highrise room users)
   const [appUsersList, setAppUsersList] = useState([]);
   const [appUsersLoading, setAppUsersLoading] = useState(false);
+  /** OWNER-granted extra process ids beyond home radio (e.g. CLOUDFLARE). */
+  const [extraCmds, setExtraCmds] = useState([]);
+  const [manageExtraCmds, setManageExtraCmds] = useState([]);
+  const [manageEditExtraCmds, setManageEditExtraCmds] = useState([]);
   const [manageUsername, setManageUsername] = useState('');
   const [managePassword, setManagePassword] = useState('');
   const [manageLevel, setManageLevel] = useState('operator');
@@ -2800,10 +2819,50 @@ function AppInner() {
         next.push('security');
       }
       setManageEditPerms(next);
+      setManageEditExtraCmds(
+        Array.isArray(u.extra_cmds)
+          ? u.extra_cmds.map((c) => String(c || '').toUpperCase()).filter(Boolean)
+          : []
+      );
       setManageEditPassword('');
     },
     [normalizeManagePerms, canGrantSecurity]
   );
+
+  /** Catalog of grantable CMDs for OWNER Gestion (live processes + known system). */
+  const manageCmdCatalog = useMemo(() => {
+    const ids = new Set();
+    KNOWN_SYSTEM_CMDS.forEach((id) => ids.add(String(id).toUpperCase()));
+    (processes || []).forEach((p) => {
+      if (p?.id) ids.add(String(p.id).toUpperCase());
+    });
+    return [...ids].sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+    );
+  }, [processes]);
+
+  const cmdOptionsForHome = useCallback(
+    (homeRole) => {
+      const home = String(homeRole || '').toUpperCase();
+      return manageCmdCatalog.filter((id) => {
+        // Home radio MAIN/BOT always included — not listed as "extra"
+        if (home && id.startsWith(home)) return false;
+        return true;
+      });
+    },
+    [manageCmdCatalog]
+  );
+
+  const toggleManageExtraCmd = useCallback((cmdId, setList) => {
+    const key = String(cmdId || '').toUpperCase();
+    if (!key || typeof setList !== 'function') return;
+    setList((prev) => {
+      const set = new Set((prev || []).map((c) => String(c).toUpperCase()));
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      return [...set].sort();
+    });
+  }, []);
 
   const pushActionLog = useCallback((text) => {
     const line = `${new Date().toLocaleTimeString()} — ${text}`;
@@ -2959,6 +3018,7 @@ function AppInner() {
         SecureStore.deleteItemAsync(SESSION_USER_KEY),
         SecureStore.deleteItemAsync(SESSION_LEVEL_KEY),
         SecureStore.deleteItemAsync(SESSION_PERMS_KEY),
+        SecureStore.deleteItemAsync(SESSION_EXTRA_CMDS_KEY),
         SecureStore.deleteItemAsync(SESSION_MASTER_KEY),
       ]);
     } catch (e) {
@@ -2995,6 +3055,9 @@ function AppInner() {
     setManageEditPassword('');
     setManageEditPwdOnly(false);
     setManageEditSaving(false);
+    setManageExtraCmds([]);
+    setManageEditExtraCmds([]);
+    setExtraCmds([]);
     setAppUsersList([]);
     setStatusFilter('ALL');
     setTerminalVisible(false);
@@ -3265,6 +3328,7 @@ function AppInner() {
         level = null,
         permissions = null,
         isMaster = false,
+        extraCmds: sessionExtraCmds = null,
       } = {}
     ) => {
       setAuthToken(token);
@@ -3277,6 +3341,10 @@ function AppInner() {
           ? ['status', 'alerts', 'chat', 'control', 'users', 'manage_users', 'owner']
           : ['status', 'alerts', 'chat'];
       setAppPermissions(perms);
+      const cmds = Array.isArray(sessionExtraCmds)
+        ? sessionExtraCmds.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean)
+        : [];
+      setExtraCmds(cmds);
       setIsMasterLogin(!!isMaster || role === 'OWNER');
       if (role && role !== 'OWNER' && STATION_IDS.includes(role)) {
         setUsersStation(role);
@@ -3587,6 +3655,7 @@ function AppInner() {
           storedUser,
           storedLevel,
           storedPerms,
+          storedExtraCmds,
           storedMaster,
           readTsRaw,
           storedLang,
@@ -3599,6 +3668,7 @@ function AppInner() {
           SecureStore.getItemAsync(SESSION_USER_KEY),
           SecureStore.getItemAsync(SESSION_LEVEL_KEY),
           SecureStore.getItemAsync(SESSION_PERMS_KEY),
+          SecureStore.getItemAsync(SESSION_EXTRA_CMDS_KEY),
           SecureStore.getItemAsync(SESSION_MASTER_KEY),
           SecureStore.getItemAsync(NOTIFY_READ_TS_KEY),
           SecureStore.getItemAsync(LANG_KEY),
@@ -3609,10 +3679,17 @@ function AppInner() {
         } catch {
           restoredPerms = [];
         }
+        let restoredExtraCmds = [];
+        try {
+          restoredExtraCmds = storedExtraCmds ? JSON.parse(storedExtraCmds) : [];
+        } catch {
+          restoredExtraCmds = [];
+        }
         const sessionMeta = {
           username: storedUser || storedRole,
           level: storedLevel,
           permissions: Array.isArray(restoredPerms) ? restoredPerms : [],
+          extraCmds: Array.isArray(restoredExtraCmds) ? restoredExtraCmds : [],
           isMaster: storedMaster === '1' || storedRole === 'OWNER',
         };
         // Drop oversized legacy feed cache (SecureStore limit ~2048 bytes)
@@ -3658,6 +3735,7 @@ function AppInner() {
                       username: p.username,
                       level: p.level,
                       permissions: p.permissions,
+                      extraCmds: p.extraCmds,
                       isMaster: p.isMaster,
                     });
                   }
@@ -3735,6 +3813,11 @@ function AppInner() {
           SECURE_OPTS
         );
         await SecureStore.setItemAsync(
+          SESSION_EXTRA_CMDS_KEY,
+          JSON.stringify(data.extra_cmds || []),
+          SECURE_OPTS
+        );
+        await SecureStore.setItemAsync(
           SESSION_MASTER_KEY,
           data.is_master ? '1' : '0',
           SECURE_OPTS
@@ -3747,6 +3830,7 @@ function AppInner() {
         username: data.username || uname || data.role,
         level: data.level,
         permissions: data.permissions,
+        extraCmds: data.extra_cmds || [],
         isMaster: !!data.is_master,
       });
       setPasswordInput('');
@@ -3956,6 +4040,33 @@ function AppInner() {
             processesLenRef.current = merged?.length || 0;
             return merged;
           });
+        }
+        // Sync extra CMDs from what API authorized (OWNER grants apply live)
+        {
+          const roleU = String(userRoleRef.current || '').toUpperCase();
+          if (roleU && roleU !== 'OWNER' && n > 0) {
+            const fromApi = [];
+            for (let i = 0; i < procArray.length; i += 1) {
+              const id = String(procArray[i]?.id || '').toUpperCase();
+              if (id && !id.startsWith(roleU)) fromApi.push(id);
+            }
+            fromApi.sort();
+            setExtraCmds((prev) => {
+              const a = (prev || []).map((c) => String(c).toUpperCase()).sort();
+              if (
+                a.length === fromApi.length &&
+                a.every((v, i) => v === fromApi[i])
+              ) {
+                return prev;
+              }
+              SecureStore.setItemAsync(
+                SESSION_EXTRA_CMDS_KEY,
+                JSON.stringify(fromApi),
+                SECURE_OPTS
+              ).catch(() => {});
+              return fromApi;
+            });
+          }
         }
         setStatusLoaded((prev) => (prev ? prev : true));
         netFailCountRef.current = 0;
@@ -5661,26 +5772,36 @@ function AppInner() {
     }
     setManageCreating(true);
     try {
+      const body = {
+        username,
+        password,
+        level: manageLevel === 'custom' ? 'custom' : manageLevel,
+        permissions: perms,
+        role,
+        station: role,
+      };
+      // OWNER only: optional extra process slots (CLOUDFLARE, other MAIN/BOT, …)
+      if (isOwner && Array.isArray(manageExtraCmds) && manageExtraCmds.length) {
+        body.extra_cmds = manageExtraCmds.map((c) => String(c).toUpperCase());
+      }
       const data = await apiFetch('/app_users/create', {
         method: 'POST',
         token,
-        body: {
-          username,
-          password,
-          level: manageLevel === 'custom' ? 'custom' : manageLevel,
-          permissions: perms,
-          role,
-          station: role,
-        },
+        body,
       });
       if (!mountedRef.current) return;
       const u = data?.user;
       if (u) setAppUsersList((prev) => [u, ...prev.filter((x) => x.id !== u.id)]);
       setManageUsername('');
       setManagePassword('');
+      setManageExtraCmds([]);
       applyManagePreset('operator');
+      const extraNote =
+        Array.isArray(u?.extra_cmds) && u.extra_cmds.length
+          ? ` · extra=[${u.extra_cmds.join(',')}]`
+          : '';
       pushActionLog(
-        `App user +${username} → ${role} · ${u?.level || manageLevel} · [${perms.join(',')}]`
+        `App user +${username} → ${role} · ${u?.level || manageLevel} · [${perms.join(',')}]${extraNote}`
       );
       showBanner(
         t('manage.success', {
@@ -5707,6 +5828,7 @@ function AppInner() {
     managePerms,
     manageStation,
     managePermKeysAllowed,
+    manageExtraCmds,
     canGrantSecurity,
     isOwner,
     userRole,
@@ -5738,6 +5860,11 @@ function AppInner() {
       if (patch?.role && STATION_IDS.includes(String(patch.role).toUpperCase())) {
         body.role = String(patch.role).toUpperCase();
       }
+      if (Array.isArray(patch?.extra_cmds)) {
+        body.extra_cmds = patch.extra_cmds
+          .map((c) => String(c || '').toUpperCase().trim())
+          .filter(Boolean);
+      }
 
       if (
         !body.permissions &&
@@ -5745,7 +5872,8 @@ function AppInner() {
         body.password == null &&
         body.active == null &&
         body.display_name == null &&
-        body.role == null
+        body.role == null &&
+        body.extra_cmds == null
       ) {
         Alert.alert(t('manage.title'), t('manage.needPerm'));
         return null;
@@ -5835,12 +5963,19 @@ function AppInner() {
       if (manageEditPassword && manageEditPassword.length >= 4) {
         patch.password = manageEditPassword;
       }
+      // OWNER can set extra process access (empty array = radio only)
+      if (isOwner) {
+        patch.extra_cmds = (manageEditExtraCmds || []).map((c) =>
+          String(c).toUpperCase()
+        );
+      }
       const u = await updateAppLoginUser(manageEditUser, patch);
       if (u) {
         setManageEditUser(null);
         setManageEditPassword('');
         setManageEditPwdOnly(false);
         setManageEditPerms([]);
+        setManageEditExtraCmds([]);
         // Refresh list from server so UI matches disk
         fetchAppUsers({ silent: true });
       }
@@ -5853,8 +5988,10 @@ function AppInner() {
     manageEditPwdOnly,
     manageEditPassword,
     manageEditPerms,
+    manageEditExtraCmds,
     managePermKeysAllowed,
     canGrantSecurity,
+    isOwner,
     updateAppLoginUser,
     fetchAppUsers,
     t,
@@ -7494,8 +7631,16 @@ function AppInner() {
     if (isOwner) return processes;
     if (!userRole) return [];
     const roleUpper = userRole.toUpperCase();
-    return processes.filter((p) => p.id.toUpperCase().startsWith(roleUpper));
-  }, [processes, userRole, isOwner]);
+    const extraSet = new Set(
+      (extraCmds || []).map((c) => String(c || '').toUpperCase()).filter(Boolean)
+    );
+    return processes.filter((p) => {
+      const id = String(p?.id || '').toUpperCase();
+      if (!id) return false;
+      if (id.startsWith(roleUpper)) return true;
+      return extraSet.has(id);
+    });
+  }, [processes, userRole, isOwner, extraCmds]);
 
   // Single-pass counts (was 4× full filter walks every process update)
   const { activeCount, offlineCount, errorCount } = useMemo(() => {
@@ -9586,6 +9731,23 @@ function AppInner() {
                             ))
                           )}
                         </View>
+                        {Array.isArray(u.extra_cmds) && u.extra_cmds.length > 0 ? (
+                          <View style={styles.manageChipWrap}>
+                            <Text style={styles.manageExtraCmdsLabel}>
+                              {t('manage.extraCmds')}:
+                            </Text>
+                            {u.extra_cmds.map((cmd) => (
+                              <View
+                                key={`${u.id}-cmd-${cmd}`}
+                                style={[styles.manageChip, styles.manageCmdChip]}
+                              >
+                                <Text style={styles.manageChipText} numberOfLines={1}>
+                                  {cmd}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                        ) : null}
                         <TouchableOpacity
                           style={styles.manageEditRightsBtn}
                           onPress={() => openManageEditRights(u)}
@@ -9840,6 +10002,54 @@ function AppInner() {
                       );
                     })}
 
+                    {isOwner ? (
+                      <View style={styles.manageExtraCmdsBlock}>
+                        <Text style={styles.manageFieldLabel}>
+                          {t('manage.extraCmds')}
+                        </Text>
+                        <Text style={styles.manageOwnerNote}>
+                          {t('manage.extraCmdsHelp', {
+                            station: manageStation || 'RADIO#',
+                          })}
+                        </Text>
+                        <View style={styles.manageRankWrap}>
+                          {cmdOptionsForHome(manageStation).map((cmdId) => {
+                            const on = manageExtraCmds.includes(cmdId);
+                            return (
+                              <Pressable
+                                key={`mc-${cmdId}`}
+                                onPress={() =>
+                                  toggleManageExtraCmd(cmdId, setManageExtraCmds)
+                                }
+                                style={[
+                                  styles.manageRankChip,
+                                  on && {
+                                    backgroundColor: 'rgba(251,191,36,0.25)',
+                                    borderColor: '#fbbf24',
+                                  },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.manageRankChipText,
+                                    on && { color: '#fbbf24' },
+                                  ]}
+                                  numberOfLines={1}
+                                >
+                                  {cmdId}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                        {manageExtraCmds.length ? (
+                          <Text style={styles.manageGroupCount}>
+                            {manageExtraCmds.length} {t('manage.extraCmdsPicked')}
+                          </Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+
                     <TouchableOpacity
                       style={[
                         styles.manageCreateBtn,
@@ -9892,6 +10102,7 @@ function AppInner() {
                     if (manageEditSaving) return;
                     setManageEditUser(null);
                     setManageEditPerms([]);
+                    setManageEditExtraCmds([]);
                     setManageEditPassword('');
                     setManageEditPwdOnly(false);
                   }}
@@ -9925,6 +10136,7 @@ function AppInner() {
                         if (manageEditSaving) return;
                         setManageEditUser(null);
                         setManageEditPerms([]);
+                        setManageEditExtraCmds([]);
                         setManageEditPassword('');
                         setManageEditPwdOnly(false);
                       }}
@@ -10056,6 +10268,54 @@ function AppInner() {
                             </View>
                           );
                         })}
+
+                        {isOwner && manageEditUser?.role ? (
+                          <View style={styles.manageExtraCmdsBlock}>
+                            <Text style={styles.manageFieldLabel}>
+                              {t('manage.extraCmds')}
+                            </Text>
+                            <Text style={styles.manageOwnerNote}>
+                              {t('manage.extraCmdsHelp', {
+                                station: manageEditUser.role,
+                              })}
+                            </Text>
+                            <View style={styles.manageRankWrap}>
+                              {cmdOptionsForHome(manageEditUser.role).map(
+                                (cmdId) => {
+                                  const on = manageEditExtraCmds.includes(cmdId);
+                                  return (
+                                    <Pressable
+                                      key={`edc-${cmdId}`}
+                                      onPress={() =>
+                                        toggleManageExtraCmd(
+                                          cmdId,
+                                          setManageEditExtraCmds
+                                        )
+                                      }
+                                      style={[
+                                        styles.manageRankChip,
+                                        on && {
+                                          backgroundColor: 'rgba(251,191,36,0.25)',
+                                          borderColor: '#fbbf24',
+                                        },
+                                      ]}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.manageRankChipText,
+                                          on && { color: '#fbbf24' },
+                                        ]}
+                                        numberOfLines={1}
+                                      >
+                                        {cmdId}
+                                      </Text>
+                                    </Pressable>
+                                  );
+                                }
+                              )}
+                            </View>
+                          </View>
+                        ) : null}
                       </>
                     ) : null}
 
@@ -13346,6 +13606,24 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 11,
     fontStyle: 'italic',
+  },
+  manageExtraCmdsBlock: {
+    marginTop: 12,
+    marginBottom: 8,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(148,163,184,0.25)',
+  },
+  manageExtraCmdsLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+    marginRight: 4,
+    alignSelf: 'center',
+  },
+  manageCmdChip: {
+    backgroundColor: 'rgba(56,189,248,0.12)',
+    borderColor: 'rgba(56,189,248,0.4)',
   },
   manageEditRightsBtn: {
     backgroundColor: '#fbbf24',

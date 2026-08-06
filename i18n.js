@@ -241,6 +241,10 @@ const STRINGS = {
     'manage.perm.security.desc': 'Console sessions / IPs (sensible)',
     'manage.pickLevel': 'Changer le niveau',
     'manage.station': 'Radio du compte',
+    'manage.extraCmds': 'CMD supplémentaires',
+    'manage.extraCmdsHelp':
+      'Par défaut : {{station}} seulement (MAIN + BOT). Active d’autres slots (CLOUDFLARE, un autre MAIN/BOT…) pour cet utilisateur.',
+    'manage.extraCmdsPicked': 'CMD en plus',
     'manage.pickStation': 'Choisis une radio (R1–R10)',
     'manage.createBtn': 'Créer le compte',
     'manage.appUsers': 'Comptes app',
@@ -682,6 +686,10 @@ const STRINGS = {
     'manage.perm.security.desc': 'Sessions / IPs console (sensitive)',
     'manage.pickLevel': 'Change level',
     'manage.station': 'Account radio',
+    'manage.extraCmds': 'Extra CMDs',
+    'manage.extraCmdsHelp':
+      'Default: {{station}} only (MAIN + BOT). Turn on extra slots (CLOUDFLARE, another MAIN/BOT…) for this user.',
+    'manage.extraCmdsPicked': 'extra CMDs',
     'manage.pickStation': 'Pick a radio (R1–R10)',
     'manage.createBtn': 'Create account',
     'manage.appUsers': 'App accounts',
