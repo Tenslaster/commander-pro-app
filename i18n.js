@@ -243,7 +243,9 @@ const STRINGS = {
     'manage.station': 'Radio du compte',
     'manage.extraCmds': 'CMD supplémentaires',
     'manage.extraCmdsHelp':
-      'Par défaut : {{station}} seulement (MAIN + BOT). Active d’autres slots (CLOUDFLARE, un autre MAIN/BOT…) pour cet utilisateur.',
+      'Par défaut : {{station}} seulement (MAIN + BOT). Touche d’autres slots pour les ajouter — toutes les radios + système (CLOUDFLARE, ICECAST, PULSE…).',
+    'manage.extraCmdsHome': 'Toujours inclus',
+    'manage.extraCmdsPick': 'Ajouter d’autres CMD',
     'manage.extraCmdsPicked': 'CMD en plus',
     'manage.pickStation': 'Choisis une radio (R1–R10)',
     'manage.createBtn': 'Créer le compte',
@@ -688,7 +690,9 @@ const STRINGS = {
     'manage.station': 'Account radio',
     'manage.extraCmds': 'Extra CMDs',
     'manage.extraCmdsHelp':
-      'Default: {{station}} only (MAIN + BOT). Turn on extra slots (CLOUDFLARE, another MAIN/BOT…) for this user.',
+      'Default: {{station}} only (MAIN + BOT). Tap other slots to grant them — every radio + system (CLOUDFLARE, ICECAST, PULSE…).',
+    'manage.extraCmdsHome': 'Always included',
+    'manage.extraCmdsPick': 'Add other CMDs',
     'manage.extraCmdsPicked': 'extra CMDs',
     'manage.pickStation': 'Pick a radio (R1–R10)',
     'manage.createBtn': 'Create account',

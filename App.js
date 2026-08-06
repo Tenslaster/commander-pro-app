@@ -267,17 +267,25 @@ const SESSION_USER_KEY = 'session_username';
 const SESSION_LEVEL_KEY = 'session_level';
 const SESSION_PERMS_KEY = 'session_permissions';
 const SESSION_EXTRA_CMDS_KEY = 'session_extra_cmds';
-/** Common system CMD ids always offered in Gestion (plus live process list). */
+/**
+ * Full Batch Manager CMD catalog for OWNER Gestion.
+ * Always show every slot (not only what the last /status poll returned).
+ * Live process ids are merged on top so new slots still appear.
+ */
 const KNOWN_SYSTEM_CMDS = [
-  'CLOUDFLARE',
   'ICECAST',
-  'Wi-Fi',
-  'CommanderDownloads',
-  'IPhoneApp',
+  'CLOUDFLARE',
+  'MUSICBOT',
+  'DISCORD_BOT',
+  'WITHYOU',
   'PULSE',
   'PULSEGO',
+  'PULSEDOWNLOADS',
   'CASINO',
   'CASINOGO',
+  'COMMANDERDOWNLOADS',
+  'IPHONEAPP',
+  'WI-FI',
   'BENCH',
   'T1',
 ];
@@ -555,6 +563,20 @@ const STATION_IDS = [
   'RADIO9',
   'RADIO10',
 ];
+// Full CMD list for Gestion (every radio MAIN/BOT + system slots)
+const KNOWN_RADIO_CMDS = STATION_IDS.flatMap((st) => [`${st}_MAIN`, `${st}_BOT`]);
+const ALL_KNOWN_CMDS = [...KNOWN_RADIO_CMDS, ...KNOWN_SYSTEM_CMDS];
+
+/**
+ * True if process id belongs to home radio (RADIO1_MAIN/BOT).
+ * Must NOT treat RADIO10 as RADIO1 — never use bare startsWith(role).
+ */
+function isHomeRadioCmd(cmdId, homeRole) {
+  const id = String(cmdId || '').toUpperCase();
+  const home = String(homeRole || '').toUpperCase();
+  if (!id || !home) return false;
+  return id === home || id.startsWith(`${home}_`);
+}
 
 /** Normalize API / cache station strings to RADIO1…RADIO10 (case-safe). */
 function normalizeStationId(value) {
@@ -2829,39 +2851,95 @@ function AppInner() {
     [normalizeManagePerms, canGrantSecurity]
   );
 
-  /** Catalog of grantable CMDs for OWNER Gestion (live processes + known system). */
+  /**
+   * Full CMD catalog = everything Batch Manager can have:
+   * live /status process ids (source of truth) + full known RADIO1–10 + system slots.
+   * Always includes RADIO1 and RADIO10 (fixed startsWith bug with RADIO1 vs RADIO10).
+   */
   const manageCmdCatalog = useMemo(() => {
     const ids = new Set();
-    KNOWN_SYSTEM_CMDS.forEach((id) => ids.add(String(id).toUpperCase()));
+    // 1) Live BM processes first (exact ids from the host)
     (processes || []).forEach((p) => {
-      if (p?.id) ids.add(String(p.id).toUpperCase());
+      const u = String(p?.id || '').toUpperCase().trim();
+      if (u) ids.add(u);
     });
-    return [...ids].sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-    );
+    // 2) Always seed full known catalog so empty/partial status never hides slots
+    (ALL_KNOWN_CMDS || []).forEach((id) => {
+      const u = String(id || '').toUpperCase().trim();
+      if (u) ids.add(u);
+    });
+    const list = [...ids];
+    list.sort((a, b) => {
+      const ra = a.match(/^RADIO(\d+)_(MAIN|BOT)$/i);
+      const rb = b.match(/^RADIO(\d+)_(MAIN|BOT)$/i);
+      if (ra && rb) {
+        const na = parseInt(ra[1], 10);
+        const nb = parseInt(rb[1], 10);
+        if (na !== nb) return na - nb;
+        if (ra[2] !== rb[2]) return ra[2].toUpperCase() === 'MAIN' ? -1 : 1;
+        return 0;
+      }
+      if (ra && !rb) return -1;
+      if (!ra && rb) return 1;
+      return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+    });
+    return list;
   }, [processes]);
 
+  /**
+   * Everything BM has — full list for picking.
+   * Home-radio slots stay granted server-side even if not toggled as "extra".
+   */
   const cmdOptionsForHome = useCallback(
+    (_homeRole) => manageCmdCatalog,
+    [manageCmdCatalog]
+  );
+
+  /** Home radio auto slots only (RADIO4_MAIN/BOT — not RADIO10 when home is RADIO1). */
+  const homeCmdSlots = useCallback(
     (homeRole) => {
       const home = String(homeRole || '').toUpperCase();
-      return manageCmdCatalog.filter((id) => {
-        // Home radio MAIN/BOT always included — not listed as "extra"
-        if (home && id.startsWith(home)) return false;
-        return true;
-      });
+      if (!home || !STATION_IDS.includes(home)) return [];
+      return manageCmdCatalog.filter((id) => isHomeRadioCmd(id, home));
     },
     [manageCmdCatalog]
   );
 
-  const toggleManageExtraCmd = useCallback((cmdId, setList) => {
+  const toggleManageExtraCmd = useCallback((cmdId, setList, homeRole) => {
     const key = String(cmdId || '').toUpperCase();
     if (!key || typeof setList !== 'function') return;
+    // Home MAIN/BOT always on — no toggle off
+    if (isHomeRadioCmd(key, homeRole)) return;
     setList((prev) => {
       const set = new Set((prev || []).map((c) => String(c).toUpperCase()));
       if (set.has(key)) set.delete(key);
       else set.add(key);
       return [...set].sort();
     });
+  }, []);
+
+  const setAllExtraCmds = useCallback(
+    (homeRole, setList, turnOn) => {
+      if (typeof setList !== 'function') return;
+      if (!turnOn) {
+        setList([]);
+        return;
+      }
+      // All non-home CMDs (home is automatic)
+      setList(
+        manageCmdCatalog.filter((id) => !isHomeRadioCmd(id, homeRole))
+      );
+    },
+    [manageCmdCatalog]
+  );
+
+  /** Pretty chip label (keep readable ids). */
+  const formatCmdLabel = useCallback((cmdId) => {
+    const id = String(cmdId || '');
+    // RADIO4_MAIN → R4 MAIN, RADIO10_BOT → R10 BOT
+    const m = id.match(/^RADIO(\d+)_(MAIN|BOT)$/i);
+    if (m) return `R${m[1]} ${m[2].toUpperCase()}`;
+    return id;
   }, []);
 
   const pushActionLog = useCallback((text) => {
@@ -4048,7 +4126,7 @@ function AppInner() {
             const fromApi = [];
             for (let i = 0; i < procArray.length; i += 1) {
               const id = String(procArray[i]?.id || '').toUpperCase();
-              if (id && !id.startsWith(roleU)) fromApi.push(id);
+              if (id && !isHomeRadioCmd(id, roleU)) fromApi.push(id);
             }
             fromApi.sort();
             setExtraCmds((prev) => {
@@ -7637,7 +7715,8 @@ function AppInner() {
     return processes.filter((p) => {
       const id = String(p?.id || '').toUpperCase();
       if (!id) return false;
-      if (id.startsWith(roleUpper)) return true;
+      // RADIO1 must not match RADIO10 (use home_ prefix, not bare startsWith)
+      if (isHomeRadioCmd(id, roleUpper)) return true;
       return extraSet.has(id);
     });
   }, [processes, userRole, isOwner, extraCmds]);
@@ -10005,48 +10084,87 @@ function AppInner() {
                     {isOwner ? (
                       <View style={styles.manageExtraCmdsBlock}>
                         <Text style={styles.manageFieldLabel}>
-                          {t('manage.extraCmds')}
+                          {t('manage.extraCmds')} · {manageCmdCatalog.length}
                         </Text>
                         <Text style={styles.manageOwnerNote}>
                           {t('manage.extraCmdsHelp', {
                             station: manageStation || 'RADIO#',
                           })}
                         </Text>
+                        <View style={styles.managePermToolbar}>
+                          <Text style={styles.manageCmdSectionTitle}>
+                            {t('manage.extraCmdsPick')} (R1–R10 + system)
+                          </Text>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            <Pressable
+                              onPress={() =>
+                                setAllExtraCmds(manageStation, setManageExtraCmds, true)
+                              }
+                              style={styles.managePermQuickBtn}
+                            >
+                              <Text style={styles.managePermQuickText}>
+                                {t('manage.permAll')}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              onPress={() =>
+                                setAllExtraCmds(manageStation, setManageExtraCmds, false)
+                              }
+                              style={styles.managePermQuickBtn}
+                            >
+                              <Text style={styles.managePermQuickText}>
+                                {t('manage.permNone')}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
                         <View style={styles.manageRankWrap}>
-                          {cmdOptionsForHome(manageStation).map((cmdId) => {
-                            const on = manageExtraCmds.includes(cmdId);
+                          {manageCmdCatalog.map((cmdId) => {
+                            const homeOn = isHomeRadioCmd(cmdId, manageStation);
+                            const on =
+                              homeOn || manageExtraCmds.includes(cmdId);
+                            const isRadio = /^RADIO\d+_/i.test(cmdId);
                             return (
                               <Pressable
                                 key={`mc-${cmdId}`}
                                 onPress={() =>
-                                  toggleManageExtraCmd(cmdId, setManageExtraCmds)
+                                  toggleManageExtraCmd(
+                                    cmdId,
+                                    setManageExtraCmds,
+                                    manageStation
+                                  )
                                 }
+                                disabled={homeOn}
                                 style={[
                                   styles.manageRankChip,
-                                  on && {
-                                    backgroundColor: 'rgba(251,191,36,0.25)',
-                                    borderColor: '#fbbf24',
-                                  },
+                                  isRadio && styles.manageCmdChipRadio,
+                                  homeOn && styles.manageCmdChipLocked,
+                                  on &&
+                                    !homeOn && {
+                                      backgroundColor: 'rgba(251,191,36,0.25)',
+                                      borderColor: '#fbbf24',
+                                    },
                                 ]}
                               >
                                 <Text
                                   style={[
                                     styles.manageRankChipText,
-                                    on && { color: '#fbbf24' },
+                                    homeOn && { color: '#94a3b8' },
+                                    on && !homeOn && { color: '#fbbf24' },
                                   ]}
                                   numberOfLines={1}
                                 >
-                                  {cmdId}
+                                  {formatCmdLabel(cmdId)}
+                                  {homeOn ? ' ✓' : ''}
                                 </Text>
                               </Pressable>
                             );
                           })}
                         </View>
-                        {manageExtraCmds.length ? (
-                          <Text style={styles.manageGroupCount}>
-                            {manageExtraCmds.length} {t('manage.extraCmdsPicked')}
-                          </Text>
-                        ) : null}
+                        <Text style={styles.manageGroupCount}>
+                          {manageExtraCmds.length} {t('manage.extraCmdsPicked')} ·{' '}
+                          {manageCmdCatalog.length} total
+                        </Text>
                       </View>
                     ) : null}
 
@@ -10272,48 +10390,98 @@ function AppInner() {
                         {isOwner && manageEditUser?.role ? (
                           <View style={styles.manageExtraCmdsBlock}>
                             <Text style={styles.manageFieldLabel}>
-                              {t('manage.extraCmds')}
+                              {t('manage.extraCmds')} · {manageCmdCatalog.length}
                             </Text>
                             <Text style={styles.manageOwnerNote}>
                               {t('manage.extraCmdsHelp', {
                                 station: manageEditUser.role,
                               })}
                             </Text>
+                            <View style={styles.managePermToolbar}>
+                              <Text style={styles.manageCmdSectionTitle}>
+                                {t('manage.extraCmdsPick')} (R1–R10 + system)
+                              </Text>
+                              <View style={{ flexDirection: 'row', gap: 8 }}>
+                                <Pressable
+                                  onPress={() =>
+                                    setAllExtraCmds(
+                                      manageEditUser.role,
+                                      setManageEditExtraCmds,
+                                      true
+                                    )
+                                  }
+                                  style={styles.managePermQuickBtn}
+                                >
+                                  <Text style={styles.managePermQuickText}>
+                                    {t('manage.permAll')}
+                                  </Text>
+                                </Pressable>
+                                <Pressable
+                                  onPress={() =>
+                                    setAllExtraCmds(
+                                      manageEditUser.role,
+                                      setManageEditExtraCmds,
+                                      false
+                                    )
+                                  }
+                                  style={styles.managePermQuickBtn}
+                                >
+                                  <Text style={styles.managePermQuickText}>
+                                    {t('manage.permNone')}
+                                  </Text>
+                                </Pressable>
+                              </View>
+                            </View>
                             <View style={styles.manageRankWrap}>
-                              {cmdOptionsForHome(manageEditUser.role).map(
-                                (cmdId) => {
-                                  const on = manageEditExtraCmds.includes(cmdId);
-                                  return (
-                                    <Pressable
-                                      key={`edc-${cmdId}`}
-                                      onPress={() =>
-                                        toggleManageExtraCmd(
-                                          cmdId,
-                                          setManageEditExtraCmds
-                                        )
-                                      }
-                                      style={[
-                                        styles.manageRankChip,
-                                        on && {
+                              {manageCmdCatalog.map((cmdId) => {
+                                const homeOn = isHomeRadioCmd(
+                                  cmdId,
+                                  manageEditUser.role
+                                );
+                                const on =
+                                  homeOn || manageEditExtraCmds.includes(cmdId);
+                                const isRadio = /^RADIO\d+_/i.test(cmdId);
+                                return (
+                                  <Pressable
+                                    key={`edc-${cmdId}`}
+                                    onPress={() =>
+                                      toggleManageExtraCmd(
+                                        cmdId,
+                                        setManageEditExtraCmds,
+                                        manageEditUser.role
+                                      )
+                                    }
+                                    disabled={homeOn}
+                                    style={[
+                                      styles.manageRankChip,
+                                      isRadio && styles.manageCmdChipRadio,
+                                      homeOn && styles.manageCmdChipLocked,
+                                      on &&
+                                        !homeOn && {
                                           backgroundColor: 'rgba(251,191,36,0.25)',
                                           borderColor: '#fbbf24',
                                         },
+                                    ]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.manageRankChipText,
+                                        homeOn && { color: '#94a3b8' },
+                                        on && !homeOn && { color: '#fbbf24' },
                                       ]}
+                                      numberOfLines={1}
                                     >
-                                      <Text
-                                        style={[
-                                          styles.manageRankChipText,
-                                          on && { color: '#fbbf24' },
-                                        ]}
-                                        numberOfLines={1}
-                                      >
-                                        {cmdId}
-                                      </Text>
-                                    </Pressable>
-                                  );
-                                }
-                              )}
+                                      {formatCmdLabel(cmdId)}
+                                      {homeOn ? ' ✓' : ''}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
                             </View>
+                            <Text style={styles.manageGroupCount}>
+                              {manageEditExtraCmds.length} {t('manage.extraCmdsPicked')} ·{' '}
+                              {manageCmdCatalog.length} total
+                            </Text>
                           </View>
                         ) : null}
                       </>
@@ -13621,9 +13789,25 @@ const styles = StyleSheet.create({
     marginRight: 4,
     alignSelf: 'center',
   },
+  manageCmdSectionTitle: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 8,
+    marginBottom: 6,
+  },
   manageCmdChip: {
     backgroundColor: 'rgba(56,189,248,0.12)',
     borderColor: 'rgba(56,189,248,0.4)',
+  },
+  manageCmdChipRadio: {
+    backgroundColor: 'rgba(167,139,250,0.1)',
+    borderColor: 'rgba(167,139,250,0.35)',
+  },
+  manageCmdChipLocked: {
+    backgroundColor: 'rgba(51,65,85,0.5)',
+    borderColor: 'rgba(100,116,139,0.5)',
+    opacity: 0.9,
   },
   manageEditRightsBtn: {
     backgroundColor: '#fbbf24',
