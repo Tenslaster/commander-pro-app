@@ -268,14 +268,13 @@ const SESSION_LEVEL_KEY = 'session_level';
 const SESSION_PERMS_KEY = 'session_permissions';
 const SESSION_EXTRA_CMDS_KEY = 'session_extra_cmds';
 /**
- * Full Batch Manager CMD catalog for OWNER Gestion.
- * Always show every slot (not only what the last /status poll returned).
- * Live process ids are merged on top so new slots still appear.
+ * Fallback BM bat slots (settings.env) when /api/process_ids not loaded yet.
+ * Live Batch Manager inventory always wins when available.
  */
 const KNOWN_SYSTEM_CMDS = [
+  'MUSICBOT',
   'ICECAST',
   'CLOUDFLARE',
-  'MUSICBOT',
   'DISCORD_BOT',
   'WITHYOU',
   'PULSE',
@@ -283,11 +282,6 @@ const KNOWN_SYSTEM_CMDS = [
   'PULSEDOWNLOADS',
   'CASINO',
   'CASINOGO',
-  'COMMANDERDOWNLOADS',
-  'IPHONEAPP',
-  'WI-FI',
-  'BENCH',
-  'T1',
 ];
 const SESSION_MASTER_KEY = 'session_is_master';
 const BIOMETRIC_KEY = 'biometric_enabled';
@@ -569,7 +563,7 @@ const ALL_KNOWN_CMDS = [...KNOWN_RADIO_CMDS, ...KNOWN_SYSTEM_CMDS];
 
 /**
  * True if process id belongs to home radio (RADIO1_MAIN/BOT).
- * Must NOT treat RADIO10 as RADIO1 — never use bare startsWith(role).
+ * Must NOT treat RADIO10 as RADIO1 — never use bare startsWith('RADIO1').
  */
 function isHomeRadioCmd(cmdId, homeRole) {
   const id = String(cmdId || '').toUpperCase();
@@ -578,19 +572,44 @@ function isHomeRadioCmd(cmdId, homeRole) {
   return id === home || id.startsWith(`${home}_`);
 }
 
+/**
+ * Extract RADIO1..RADIO10 from a process id/name.
+ * RADIO10 must never resolve as RADIO1 (no includes/'RADIO1' prefix tricks).
+ */
+function stationIdFromProcessId(raw) {
+  const id = String(raw || '').toUpperCase();
+  if (!id) return null;
+  // 10 before 1-9 so RADIO10 is not truncated to RADIO1
+  const m =
+    id.match(/RADIO\s*(10|[1-9])(?:\D|$)/i) ||
+    id.match(/^R\s*(10|[1-9])(?:\D|$)/i);
+  if (m) {
+    const st = `RADIO${m[1]}`;
+    return STATION_IDS.includes(st) ? st : null;
+  }
+  // Longest station first (RADIO10 before RADIO1)
+  for (let i = STATION_IDS.length - 1; i >= 0; i -= 1) {
+    const st = STATION_IDS[i];
+    if (id === st || id.startsWith(`${st}_`)) return st;
+  }
+  return null;
+}
+
 /** Normalize API / cache station strings to RADIO1…RADIO10 (case-safe). */
 function normalizeStationId(value) {
   const u = String(value || '')
     .trim()
     .toUpperCase();
   if (STATION_IDS.includes(u)) return u;
-  // Tolerate "R1" / "radio 1" style slips from older bridges
+  // Tolerate "R1" / "radio 1" / "RADIO10" — 10 before 1-9
   const m = u.match(/^R(?:ADIO)?[\s_-]*(10|[1-9])$/);
   if (m) {
     const id = `RADIO${m[1]}`;
     return STATION_IDS.includes(id) ? id : '';
   }
-  return '';
+  // Process-style RADIO10_MAIN
+  const fromProc = stationIdFromProcessId(u);
+  return fromProc || '';
 }
 
 /** Fallback stream paths (API provides full URLs when online) */
@@ -1829,15 +1848,10 @@ const ProcessCard = React.memo(
     const showRoom = isBot && (allowBotConfig || allowRoomEdit);
     const showApiKey = isBot && (allowBotConfig || allowApiKeyEdit);
     // Main radio process for this station → show Listen next to start/stop
-    const stationFromId = (() => {
-      const id = String(item?.id || item?.name || '');
-      const m = id.match(/RADIO\s*(\d{1,2})/i) || id.match(/R(\d{1,2})/i);
-      if (m) return `RADIO${parseInt(m[1], 10)}`;
-      for (const st of STATION_IDS) {
-        if (id.toUpperCase().includes(st)) return st;
-      }
-      return null;
-    })();
+    // Never use includes('RADIO1') — that wrongly maps RADIO10 → RADIO1
+    const stationFromId = stationIdFromProcessId(
+      item?.id || item?.name || ''
+    );
     const isMainRadio =
       !isBot &&
       stationFromId &&
@@ -2401,6 +2415,8 @@ function AppInner() {
   const [extraCmds, setExtraCmds] = useState([]);
   const [manageExtraCmds, setManageExtraCmds] = useState([]);
   const [manageEditExtraCmds, setManageEditExtraCmds] = useState([]);
+  /** Live Batch Manager inventory from /api/process_ids (every bat/slot). */
+  const [bmProcessList, setBmProcessList] = useState([]);
   const [manageUsername, setManageUsername] = useState('');
   const [managePassword, setManagePassword] = useState('');
   const [manageLevel, setManageLevel] = useState('operator');
@@ -2852,22 +2868,33 @@ function AppInner() {
   );
 
   /**
-   * Full CMD catalog = everything Batch Manager can have:
-   * live /status process ids (source of truth) + full known RADIO1–10 + system slots.
-   * Always includes RADIO1 and RADIO10 (fixed startsWith bug with RADIO1 vs RADIO10).
+   * Full CMD catalog = everything Batch Manager has right now.
+   * Priority: /api/process_ids (exact bats) → live /status → known fallback.
    */
   const manageCmdCatalog = useMemo(() => {
     const ids = new Set();
-    // 1) Live BM processes first (exact ids from the host)
-    (processes || []).forEach((p) => {
-      const u = String(p?.id || '').toUpperCase().trim();
-      if (u) ids.add(u);
-    });
-    // 2) Always seed full known catalog so empty/partial status never hides slots
-    (ALL_KNOWN_CMDS || []).forEach((id) => {
+    const meta = {};
+    const add = (id, info) => {
       const u = String(id || '').toUpperCase().trim();
-      if (u) ids.add(u);
+      if (!u) return;
+      ids.add(u);
+      if (info && !meta[u]) meta[u] = info;
+    };
+    // 1) Official BM inventory (every bat slot from settings.env load)
+    (bmProcessList || []).forEach((p) => {
+      add(p?.id, {
+        name: p?.name || p?.id,
+        bat: p?.bat_file || '',
+      });
     });
+    // 2) Live status rows (same BM processes)
+    (processes || []).forEach((p) => {
+      add(p?.id, { name: p?.name || p?.id, bat: '' });
+    });
+    // 3) Fallback seed so UI is never empty offline
+    if (ids.size === 0) {
+      (ALL_KNOWN_CMDS || []).forEach((id) => add(id, null));
+    }
     const list = [...ids];
     list.sort((a, b) => {
       const ra = a.match(/^RADIO(\d+)_(MAIN|BOT)$/i);
@@ -2883,8 +2910,9 @@ function AppInner() {
       if (!ra && rb) return 1;
       return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
     });
+    list._meta = meta;
     return list;
-  }, [processes]);
+  }, [processes, bmProcessList]);
 
   /**
    * Everything BM has — full list for picking.
@@ -2933,14 +2961,25 @@ function AppInner() {
     [manageCmdCatalog]
   );
 
-  /** Pretty chip label (keep readable ids). */
-  const formatCmdLabel = useCallback((cmdId) => {
-    const id = String(cmdId || '');
-    // RADIO4_MAIN → R4 MAIN, RADIO10_BOT → R10 BOT
-    const m = id.match(/^RADIO(\d+)_(MAIN|BOT)$/i);
-    if (m) return `R${m[1]} ${m[2].toUpperCase()}`;
-    return id;
-  }, []);
+  /** Pretty chip label — id + bat when known (RADIO10 never shown as R1). */
+  const formatCmdLabel = useCallback(
+    (cmdId) => {
+      const id = String(cmdId || '');
+      const meta = manageCmdCatalog._meta?.[id.toUpperCase()];
+      const m = id.match(/^RADIO(\d+)_(MAIN|BOT)$/i);
+      let base = m ? `R${m[1]} ${m[2].toUpperCase()}` : id;
+      if (meta?.bat) {
+        const bat = String(meta.bat).replace(/\.bat$/i, '');
+        if (bat && bat.toUpperCase() !== id.toUpperCase()) {
+          base = `${base} · ${bat}`;
+        }
+      } else if (meta?.name && String(meta.name).toUpperCase() !== id.toUpperCase()) {
+        base = `${base} · ${meta.name}`;
+      }
+      return base;
+    },
+    [manageCmdCatalog]
+  );
 
   const pushActionLog = useCallback((text) => {
     const line = `${new Date().toLocaleTimeString()} — ${text}`;
@@ -3136,6 +3175,7 @@ function AppInner() {
     setManageExtraCmds([]);
     setManageEditExtraCmds([]);
     setExtraCmds([]);
+    setBmProcessList([]);
     setAppUsersList([]);
     setStatusFilter('ALL');
     setTerminalVisible(false);
@@ -3224,6 +3264,25 @@ function AppInner() {
     },
     [handleLogout, noteUnauthorized, t]
   );
+
+  /** Full Batch Manager bat/slot list for Gestion (must run after handleAuthFailure). */
+  const fetchBmProcessIds = useCallback(async () => {
+    const token = authTokenRef.current;
+    if (!token || !canManageAppUsers) return;
+    try {
+      const data = await apiFetch('/process_ids', { token, timeoutMs: 12000 });
+      if (!mountedRef.current) return;
+      const rows = Array.isArray(data?.processes)
+        ? data.processes
+        : Array.isArray(data?.ids)
+          ? data.ids.map((id) => ({ id }))
+          : [];
+      setBmProcessList(rows.filter((r) => r && (r.id || r)));
+    } catch (error) {
+      if (error?.code === 'UNAUTHORIZED') handleAuthFailure('api');
+      // Keep previous catalog on failure
+    }
+  }, [canManageAppUsers, handleAuthFailure]);
 
   /**
    * Register this APK/IPA with the API.
@@ -7646,12 +7705,13 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainTab, usersStation, fetchStationUsers]);
 
-  // Management tab: app login accounts
+  // Management tab: app login accounts + full BM bat inventory
   useEffect(() => {
     if (mainTab !== 'manage' || !canManageAppUsers) return undefined;
     fetchAppUsers({ silent: false });
+    fetchBmProcessIds();
     return undefined;
-  }, [mainTab, canManageAppUsers, fetchAppUsers]);
+  }, [mainTab, canManageAppUsers, fetchAppUsers, fetchBmProcessIds]);
 
   // Playlist tab: AutoDJ folder for current station
   useEffect(() => {
@@ -10093,7 +10153,10 @@ function AppInner() {
                         </Text>
                         <View style={styles.managePermToolbar}>
                           <Text style={styles.manageCmdSectionTitle}>
-                            {t('manage.extraCmdsPick')} (R1–R10 + system)
+                            {t('manage.extraCmdsPick')}
+                            {bmProcessList.length
+                              ? ` · BM ${bmProcessList.length}`
+                              : ''}
                           </Text>
                           <View style={{ flexDirection: 'row', gap: 8 }}>
                             <Pressable
@@ -10399,7 +10462,10 @@ function AppInner() {
                             </Text>
                             <View style={styles.managePermToolbar}>
                               <Text style={styles.manageCmdSectionTitle}>
-                                {t('manage.extraCmdsPick')} (R1–R10 + system)
+                                {t('manage.extraCmdsPick')}
+                                {bmProcessList.length
+                                  ? ` · BM ${bmProcessList.length}`
+                                  : ''}
                               </Text>
                               <View style={{ flexDirection: 'row', gap: 8 }}>
                                 <Pressable
@@ -11011,6 +11077,7 @@ function AppInner() {
                 onPress={() => {
                   switchMainTab('manage');
                   fetchAppUsers({ silent: true });
+                  fetchBmProcessIds();
                 }}
               />
             ) : null}
