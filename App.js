@@ -691,15 +691,15 @@ const RANK_LEVELS = {
 };
 const STATUS_FILTER_IDS = ['ALL', 'RUNNING', 'STOPPED', 'BOTS', 'MAINS'];
 
-const rankColor = (rank) => {
-  const r = (rank || 'guest').toLowerCase();
-  if (r === 'dev') return '#f472b6';
-  if (r === 'owner') return '#c084fc';
-  if (r === 'admin') return '#60a5fa';
-  if (r === 'mod') return '#34d399';
-  if (r === 'vip' || r === 'superior') return '#fbbf24';
-  return '#64748b';
+const RANK_COLORS = {
+  dev: '#f472b6',
+  owner: '#c084fc',
+  admin: '#60a5fa',
+  mod: '#34d399',
+  vip: '#fbbf24',
+  superior: '#fbbf24',
 };
+const rankColor = (rank) => RANK_COLORS[(rank || 'guest').toLowerCase()] || '#64748b';
 
 const NOTIFY_CHAT_FILTER_DEFS = [
   { id: 'ALL', labelKey: 'filter.type.all', color: '#38bdf8' },
@@ -720,16 +720,19 @@ const NOTIFY_PRESETS = [
   { title: '📢 Annonce', body: "Message important de l'administrateur." },
 ];
 
+const NOTIFY_TYPE_META = {
+  alert: { icon: 'warning', color: '#f87171', labelKey: 'notify.alert' },
+  status: { icon: 'pulse', color: '#34d399', labelKey: 'notify.status' },
+  admin: { icon: 'megaphone', color: '#c084fc', labelKey: 'notify.admin' },
+  tip: { icon: 'cash', color: '#fbbf24', labelKey: 'notify.tip' },
+  song: { icon: 'musical-notes', color: '#a78bfa', labelKey: 'notify.song' },
+  log: { icon: 'document-text', color: '#60a5fa', labelKey: 'notify.log' },
+  system: { icon: 'information-circle', color: '#94a3b8', labelKey: 'notify.system' },
+};
 const notifyTypeMeta = (type, tFn) => {
-  const t = (type || 'system').toLowerCase();
   const L = typeof tFn === 'function' ? tFn : (k) => k;
-  if (t === 'alert') return { icon: 'warning', color: '#f87171', label: L('notify.alert') };
-  if (t === 'status') return { icon: 'pulse', color: '#34d399', label: L('notify.status') };
-  if (t === 'admin') return { icon: 'megaphone', color: '#c084fc', label: L('notify.admin') };
-  if (t === 'tip') return { icon: 'cash', color: '#fbbf24', label: L('notify.tip') };
-  if (t === 'song') return { icon: 'musical-notes', color: '#a78bfa', label: L('notify.song') };
-  if (t === 'log') return { icon: 'document-text', color: '#60a5fa', label: L('notify.log') };
-  return { icon: 'information-circle', color: '#94a3b8', label: L('notify.system') };
+  const m = NOTIFY_TYPE_META[(type || 'system').toLowerCase()] || NOTIFY_TYPE_META.system;
+  return { icon: m.icon, color: m.color, label: L(m.labelKey) };
 };
 
 /** Extract track name from song alert body (not gold balance **5**, not generic title). */
@@ -1613,12 +1616,20 @@ const LockScreen = ({
   );
 };
 
-const isBotProcess = (item) =>
-  !!(
-    item?.is_bot ||
-    /_BOT$/i.test(item?.id || '') ||
-    /highrise/i.test(item?.name || '')
+/** Highrise bot UI (room + API key): trust API is_bot, or local heuristics. */
+const BOT_NAME_RE = /highrise|acidix|musicbot/i;
+const isBotProcess = (item) => {
+  if (!item) return false;
+  const id = String(item.id || '');
+  const room = String(item.room_id || '').trim();
+  return !!(
+    item.is_bot ||
+    room ||
+    /_BOT$/i.test(id) ||
+    BOT_NAME_RE.test(item.name || '') ||
+    BOT_NAME_RE.test(id)
   );
+};
 
 /**
  * In-app Icecast player — Android + iOS (expo-av).
@@ -1867,16 +1878,16 @@ const ProcessCard = React.memo(
     const roomId = item.room_id || '';
     const keyMask = item.api_key_masked || (item.api_key_tail ? `…${item.api_key_tail}` : '');
 
-    const statusColor = isRunning ? '#34d399' : isError ? '#fb923c' : '#f87171';
-    const statusLabel = isRunning
-      ? tr('status.online')
-      : isError
-        ? tr('status.error')
-        : tr('status.offline');
-
     // Solid card bg (no LinearGradient per row) — major win when list re-renders
-    const cardBg = isRunning ? '#022c22' : isError ? '#1c1917' : '#09090b';
-    const cardBorder = isRunning ? '#065f46' : isError ? '#7c2d12' : '#27272a';
+    const stUi = isRunning
+      ? { color: '#34d399', label: 'status.online', bg: '#022c22', border: '#065f46' }
+      : isError
+        ? { color: '#fb923c', label: 'status.error', bg: '#1c1917', border: '#7c2d12' }
+        : { color: '#f87171', label: 'status.offline', bg: '#09090b', border: '#27272a' };
+    const statusColor = stUi.color;
+    const statusLabel = tr(stUi.label);
+    const cardBg = stUi.bg;
+    const cardBorder = stUi.border;
 
     return (
       <View
@@ -2592,117 +2603,55 @@ function AppInner() {
   const isOwner = userRole === 'OWNER';
   const showBioOnLock = biometricGate && biometricHardwareOk && biometricEnabled;
   const hasPerm = useCallback(
-    (perm) => {
-      if (isOwner || isMasterLogin) return true;
-      return (appPermissions || []).includes(perm);
-    },
+    (perm) => isOwner || isMasterLogin || (appPermissions || []).includes(perm),
     [isOwner, isMasterLogin, appPermissions]
   );
+  // hasPerm already short-circuits OWNER / master — do not re-OR those flags
+  const hasAny = useCallback((...keys) => keys.some((k) => hasPerm(k)), [hasPerm]);
   // Gestion: OWNER or app users with manage_users (their radio only on API)
-  const canManageAppUsers =
-    isOwner || isMasterLogin || hasPerm('manage_users');
+  const canManageAppUsers = hasPerm('manage_users');
   /**
    * Extra Batch Manager CMDs (CLOUDFLARE, other radios…): real OWNER only.
    * Radio managers keep Gestion (create logins on their radio) but never see/edit CMDs.
    */
   const canManageExtraCmds = isOwner;
   // Process control — umbrella `control` OR granular start/stop/restart
-  const canStartRadio =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('control') ||
-    hasPerm('control_start');
-  const canStopRadio =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('control') ||
-    hasPerm('control_stop');
-  const canRestartRadio =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('control') ||
-    hasPerm('control_restart');
-  const canControlRadios =
-    canStartRadio || canStopRadio || canRestartRadio;
-  const canOpenLogs = isOwner || isMasterLogin || hasPerm('logs');
-  const canEditRoom =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('bot_config') ||
-    hasPerm('room_edit');
-  const canEditApiKey =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('bot_config') ||
-    hasPerm('api_key_edit');
+  const canStartRadio = hasAny('control', 'control_start');
+  const canStopRadio = hasAny('control', 'control_stop');
+  const canRestartRadio = hasAny('control', 'control_restart');
+  const canControlRadios = canStartRadio || canStopRadio || canRestartRadio;
+  const canOpenLogs = hasPerm('logs');
+  const canEditRoom = hasAny('bot_config', 'room_edit');
+  const canEditApiKey = hasAny('bot_config', 'api_key_edit');
   const canBotConfig = canEditRoom || canEditApiKey;
-  const canCommands =
-    isOwner || isMasterLogin || hasPerm('commands') || hasPerm('logs');
-  const canChat = isOwner || isMasterLogin || hasPerm('chat');
-  const canChatSend = isOwner || isMasterLogin || hasPerm('chat_send');
-  const canChatEdit =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('chat_edit') ||
-    hasPerm('chat_send');
-  const canChatDelete =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('chat_delete') ||
-    hasPerm('chat_send');
-  const canAlerts = isOwner || isMasterLogin || hasPerm('alerts');
+  const canCommands = hasAny('commands', 'logs');
+  const canChat = hasAny('chat', 'chat_send');
+  const canChatSend = hasPerm('chat_send');
+  const canChatEdit = hasAny('chat_edit', 'chat_send');
+  const canChatDelete = hasAny('chat_delete', 'chat_send');
+  const canAlerts = hasPerm('alerts');
   // Push announce = real OWNER only (Centre de commande) — never grantable
   const canNotify = isOwner;
-  const canUsersTab =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('users') ||
-    hasPerm('users_edit') ||
-    hasPerm('ranks') ||
-    hasPerm('bans') ||
-    hasPerm('bank');
-  const canUsersEdit =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('users_edit') ||
-    hasPerm('ranks') ||
-    hasPerm('bans') ||
-    hasPerm('bank');
-  const canEditRanks =
-    isOwner || isMasterLogin || hasPerm('users_edit') || hasPerm('ranks');
-  const canEditBans =
-    isOwner || isMasterLogin || hasPerm('users_edit') || hasPerm('bans');
-  const canEditBank =
-    isOwner || isMasterLogin || hasPerm('users_edit') || hasPerm('bank');
-  // Stats: explicit stats perm, or legacy status/users + owner
-  const canStatsTab =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('stats') ||
+  const canUsersTab = hasAny('users', 'users_edit', 'ranks', 'bans', 'bank');
+  const canUsersEdit = hasAny('users_edit', 'ranks', 'bans', 'bank');
+  const canEditRanks = hasAny('users_edit', 'ranks');
+  const canEditBans = hasAny('users_edit', 'bans');
+  const canEditBank = hasAny('users_edit', 'bank');
+  // Stats only with explicit stats right (no status/users leak)
+  const canStatsTab = hasPerm('stats');
+  // Playlist: only playlist perms (not control umbrella)
+  const canPlaylist = hasAny('playlist', 'playlist_add', 'playlist_delete');
+  const canPlaylistAdd = hasAny('playlist', 'playlist_add');
+  const canPlaylistDelete = hasAny('playlist', 'playlist_delete');
+  const canListen = hasPerm('listen');
+  // Radios tab = process list / control / logs / bot / listen
+  const canRadiosTab =
     hasPerm('status') ||
-    hasPerm('users');
-  // Playlist view / add / delete (umbrella playlist keeps full write)
-  const canPlaylist =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('playlist') ||
-    hasPerm('playlist_add') ||
-    hasPerm('playlist_delete') ||
-    hasPerm('control');
-  const canPlaylistAdd =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('playlist') ||
-    hasPerm('playlist_add') ||
-    hasPerm('control');
-  const canPlaylistDelete =
-    isOwner ||
-    isMasterLogin ||
-    hasPerm('playlist') ||
-    hasPerm('playlist_delete') ||
-    hasPerm('control');
-  const canListen =
-    isOwner || isMasterLogin || hasPerm('listen') || hasPerm('status');
+    canControlRadios ||
+    canOpenLogs ||
+    canCommands ||
+    canBotConfig ||
+    canListen;
   // Security console: real OWNER only — never RADIO# masters (even with full rights).
   // Optional: app logins that OWNER explicitly granted 'security' may view it.
   const canSecurityTab =
@@ -2712,6 +2661,18 @@ function AppInner() {
       appPermissions.includes('security'));
   // Only real OWNER may assign / remove the security right
   const canGrantSecurity = isOwner;
+  /** First tab this account may open (custom/NONE may be chat-only). */
+  const firstAllowedTab =
+    [
+      [canRadiosTab, 'radios'],
+      [canChat, 'chat'],
+      [canAlerts, 'alerts'],
+      [canUsersTab, 'users'],
+      [canStatsTab, 'stats'],
+      [canPlaylist, 'playlist'],
+      [canManageAppUsers, 'manage'],
+      [canSecurityTab, 'security'],
+    ].find(([ok]) => ok)?.[1] || 'radios';
   const managePermGroups = useMemo(() => {
     if (!canGrantSecurity) return APP_PERM_GROUPS;
     return [
@@ -4062,26 +4023,29 @@ function AppInner() {
           if (!key || typeof key !== 'string') continue;
           const row = data[key] && typeof data[key] === 'object' ? data[key] : {};
           const id = String(key);
-          const isBot =
-            !!row.is_bot ||
-            /_BOT$/i.test(id) ||
-            /highrise/i.test(String(row.name || ''));
+          const roomId = String(row.room_id || '').trim();
+          const name =
+            row.name != null && String(row.name).trim() ? String(row.name) : id;
           let status = String(row.status || 'STOPPED').toUpperCase();
           if (status === 'ONLINE' || status === 'UP') status = 'RUNNING';
           else if (status === 'OFFLINE' || status === 'DOWN' || status === 'DEAD')
             status = 'STOPPED';
           else if (status === 'CRASHED' || status === 'FAIL') status = 'ERROR';
-          if (status !== 'RUNNING' && status !== 'STOPPED' && status !== 'ERROR') {
+          else if (status !== 'RUNNING' && status !== 'STOPPED' && status !== 'ERROR')
             status = 'STOPPED';
-          }
           procArray[n] = {
             id,
-            name: row.name != null && String(row.name).trim() ? String(row.name) : id,
+            name,
             status,
             pid: row.pid ?? null,
             auto_restart: !!row.auto_restart,
-            is_bot: isBot,
-            room_id: row.room_id || '',
+            is_bot: isBotProcess({
+              id,
+              name,
+              is_bot: row.is_bot,
+              room_id: roomId,
+            }),
+            room_id: roomId,
             api_key_masked: row.api_key_masked || '',
             api_key_tail: row.api_key_tail || '',
           };
@@ -4899,10 +4863,13 @@ function AppInner() {
     const role = String(userRoleRef.current || '').trim().toLowerCase();
     const fu = String(msg.from_user || '').trim().toLowerCase();
     const dn = String(msg.display_name || '').trim().toLowerCase();
+    const fr = String(msg.from || '').trim().toUpperCase();
     // Custom app user: match by username (Tens ≠ RADIO4, Tens ≠ other user on same radio)
     if (me && (fu === me || dn === me)) return true;
+    // NONE / unlinked peer: from is U_USERNAME
+    if (me && fr === `U_${me.toUpperCase()}`) return true;
     // Master password / role login only (username is OWNER or RADIO#)
-    if (me && me === role && msg.from === userRoleRef.current) {
+    if (me && me === role && (fr === userRoleRef.current || msg.from === userRoleRef.current)) {
       if (!fu && !dn) return true;
       if (fu === role || dn === role) return true;
       if (!fu && /^(owner|radio(?:10|[1-9]))$/i.test(dn || role)) return true;
@@ -8165,18 +8132,23 @@ function AppInner() {
         'security',
       ].includes(mainTab)
     ) {
-      setMainTab('radios');
+      setMainTab(firstAllowedTab);
       return;
     }
-    if (mainTab === 'users' && !canUsersTab) setMainTab('radios');
-    else if (mainTab === 'stats' && !canStatsTab) setMainTab('radios');
-    else if (mainTab === 'chat' && !canChat) setMainTab('radios');
-    else if (mainTab === 'alerts' && !canAlerts) setMainTab('radios');
-    else if (mainTab === 'playlist' && !canPlaylist) setMainTab('radios');
-    else if (mainTab === 'manage' && !canManageAppUsers) setMainTab('radios');
-    else if (mainTab === 'security' && !canSecurityTab) setMainTab('radios');
+    if (mainTab === 'radios' && !canRadiosTab) setMainTab(firstAllowedTab);
+    else if (mainTab === 'users' && !canUsersTab) setMainTab(firstAllowedTab);
+    else if (mainTab === 'stats' && !canStatsTab) setMainTab(firstAllowedTab);
+    else if (mainTab === 'chat' && !canChat) setMainTab(firstAllowedTab);
+    else if (mainTab === 'alerts' && !canAlerts) setMainTab(firstAllowedTab);
+    else if (mainTab === 'playlist' && !canPlaylist) setMainTab(firstAllowedTab);
+    else if (mainTab === 'manage' && !canManageAppUsers)
+      setMainTab(firstAllowedTab);
+    else if (mainTab === 'security' && !canSecurityTab)
+      setMainTab(firstAllowedTab);
   }, [
     mainTab,
+    firstAllowedTab,
+    canRadiosTab,
     canUsersTab,
     canStatsTab,
     canChat,
@@ -8480,7 +8452,7 @@ function AppInner() {
     'security',
   ].includes(mainTab)
     ? mainTab
-    : 'radios';
+    : firstAllowedTab;
 
   return (
     <LinearGradient colors={['#000000', '#0a0a0a', '#111827']} style={styles.container}>
@@ -11029,9 +11001,9 @@ function AppInner() {
             <Text style={styles.emptyText}>{t('tab.unknown')}</Text>
             <TouchableOpacity
               style={[styles.loginBtn, { marginTop: 16 }]}
-              onPress={() => setMainTab('radios')}
+              onPress={() => setMainTab(firstAllowedTab)}
             >
-              <Text style={styles.loginBtnText}>Radios</Text>
+              <Text style={styles.loginBtnText}>{t('common.ok') || 'OK'}</Text>
             </TouchableOpacity>
           </View>
         ) : null}
@@ -11039,14 +11011,16 @@ function AppInner() {
         {/* Bottom navigation — hidden inside an open chat thread so the typing bar is free */}
         {!(safeMainTab === 'chat' && activeChat) ? (
           <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-            <BottomNavItem
-              active={safeMainTab === 'radios'}
-              icon="radio-outline"
-              iconActive="radio"
-              color="#38bdf8"
-              label={t('nav.radios')}
-              onPress={() => switchMainTab('radios')}
-            />
+            {canRadiosTab ? (
+              <BottomNavItem
+                active={safeMainTab === 'radios'}
+                icon="radio-outline"
+                iconActive="radio"
+                color="#38bdf8"
+                label={t('nav.radios')}
+                onPress={() => switchMainTab('radios')}
+              />
+            ) : null}
             {canUsersTab ? (
               <BottomNavItem
                 active={safeMainTab === 'users'}

@@ -82,10 +82,7 @@ async function fetchAndNotify() {
     if (timer) clearTimeout(timer);
   }
 
-  if (!res || res.status === 401 || res.status === 426) {
-    return BackgroundFetch.BackgroundFetchResult.Failed;
-  }
-  if (!res.ok) {
+  if (!res || !res.ok || res.status === 401 || res.status === 426) {
     return BackgroundFetch.BackgroundFetchResult.Failed;
   }
 

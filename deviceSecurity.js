@@ -41,20 +41,16 @@ export async function assessDeviceIntegrity() {
   const isStandalone =
     execEnv === 'standalone' || execEnv === 'bare' || execEnv === undefined;
 
-  if (isStandalone && Platform.OS === 'android') {
-    const id = Constants.expoConfig?.android?.package || '';
-    if (id && id !== EXPECTED_ANDROID_PKG) {
+  if (isStandalone && (Platform.OS === 'ios' || Platform.OS === 'android')) {
+    const isIos = Platform.OS === 'ios';
+    const expected = isIos ? EXPECTED_IOS_BUNDLE : EXPECTED_ANDROID_PKG;
+    const id = isIos
+      ? Constants.expoConfig?.ios?.bundleIdentifier || ''
+      : Constants.expoConfig?.android?.package || '';
+    if (id && id !== expected) {
       packageOk = false;
       compromised = true;
-      reasons.push('unexpected_package');
-    }
-  }
-  if (isStandalone && Platform.OS === 'ios') {
-    const id = Constants.expoConfig?.ios?.bundleIdentifier || '';
-    if (id && id !== EXPECTED_IOS_BUNDLE) {
-      packageOk = false;
-      compromised = true;
-      reasons.push('unexpected_bundle');
+      reasons.push(isIos ? 'unexpected_bundle' : 'unexpected_package');
     }
   }
 

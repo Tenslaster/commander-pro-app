@@ -20,7 +20,7 @@ BACKUP = ROOT / "dist" / "apk" / "CommanderPro-pre-repack-backup.apk"
 EXPORT = ROOT / "dist-android-export"
 WORK = ROOT / "dist-apk-work"
 UNSIGNED = WORK / "unsigned.apk"
-VERSION = "1.5.0"
+VERSION = "1.5.5"
 DEBUG_KS = Path.home() / ".android" / "debug.keystore"
 KEYTOOL = Path(r"C:\Program Files\Eclipse Adoptium\jre-21.0.5.11-hotspot\bin\keytool.exe")
 

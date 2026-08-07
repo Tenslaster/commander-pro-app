@@ -62,18 +62,11 @@ export const CACHE_TTL = {
 
 /**
  * Hard TTLs (ms) — refuse to paint only after this.
- * Default: 1 week for everything so cold launch / offline still has data.
+ * Default: 1 week for every kind so cold launch / offline still has data.
  */
-export const CACHE_HARD_TTL = {
-  status: CACHE_WEEK_MS,
-  streams: CACHE_WEEK_MS,
-  notify: CACHE_WEEK_MS,
-  stats: CACHE_WEEK_MS,
-  users: CACHE_WEEK_MS,
-  playlist: CACHE_WEEK_MS,
-  app_users: CACHE_WEEK_MS,
-  security: CACHE_WEEK_MS,
-};
+export const CACHE_HARD_TTL = Object.fromEntries(
+  Object.keys(CACHE_TTL).map((k) => [k, CACHE_WEEK_MS])
+);
 
 const MEM_MAX_KEYS = 120;
 const MAX_USERS_CACHE = 100_000;
@@ -353,70 +346,6 @@ async function migrateFromAsyncStorage(db) {
     if (ours.length) await AsyncStorage.multiRemove(ours);
   } catch {
     /* ignore migration errors */
-  }
-}
-
-async function replaceUsersTable(db, station, rows, ts) {
-  const st = String(station || '').toUpperCase();
-  if (!Array.isArray(rows) || !rows.length) {
-    await db.runAsync('DELETE FROM cache_users WHERE station = ?', st);
-    return;
-  }
-  // Cap row materialization — full catalog stays in cache_kv blob.
-  // Writing 10k+ individual awaits froze the UI ~every soft TTL (5 min).
-  const MAX_ROWS = 800;
-  const slice = rows.length > MAX_ROWS ? rows.slice(0, MAX_ROWS) : rows;
-  const run = async () => {
-    await db.runAsync('DELETE FROM cache_users WHERE station = ?', st);
-    // Chunked multi-row INSERT (far fewer round-trips than 1 await/row)
-    const chunk = 40;
-    for (let i = 0; i < slice.length; i += chunk) {
-      const part = slice.slice(i, i + chunk);
-      const placeholders = part.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
-      const params = [];
-      for (let j = 0; j < part.length; j += 1) {
-        const u = part[j] || {};
-        const username = String(u.username || '')
-          .toLowerCase()
-          .replace(/^@/, '');
-        if (!username) continue;
-        params.push(
-          st,
-          username,
-          u.id || `${st}:${username}`,
-          u.rank || 'guest',
-          typeof u.rank_level === 'number' ? u.rank_level : 0,
-          u.banned ? 1 : 0,
-          Number(u.bank) || 0,
-          Number(u.gold_tipped) || 0,
-          Number(u.songs_played) || 0,
-          Number(u.room_minutes) || 0,
-          u.room_time || '0m',
-          Number(u.gold_transferred_out) || 0,
-          Number(u.gold_transferred_in) || 0,
-          ts
-        );
-      }
-      if (!params.length) continue;
-      // Recount placeholders if we skipped empty usernames
-      const n = params.length / 14;
-      const ph = Array.from({ length: n }, () => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(
-        ','
-      );
-      await db.runAsync(
-        `INSERT OR REPLACE INTO cache_users(
-          station, username, id, rank, rank_level, banned, bank, gold_tipped,
-          songs_played, room_minutes, room_time, gold_transferred_out,
-          gold_transferred_in, ts
-        ) VALUES ${ph}`,
-        ...params
-      );
-    }
-  };
-  if (typeof db.withTransactionAsync === 'function') {
-    await db.withTransactionAsync(run);
-  } else {
-    await run();
   }
 }
 

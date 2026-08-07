@@ -32,10 +32,16 @@ let _nonceWarmPromise = null;
 
 function _bytesToHex(arr) {
   let out = '';
-  for (let i = 0; i < arr.length; i += 1) {
-    out += arr[i].toString(16).padStart(2, '0');
-  }
+  for (let i = 0; i < arr.length; i += 1) out += arr[i].toString(16).padStart(2, '0');
   return out;
+}
+
+function _webCrypto() {
+  return (
+    (typeof globalThis !== 'undefined' && globalThis.crypto) ||
+    (typeof global !== 'undefined' && global.crypto) ||
+    null
+  );
 }
 
 /**
@@ -65,10 +71,7 @@ export async function warmSecureRandom(poolBytes = 512) {
       } catch {
         /* try WebCrypto below */
       }
-      const c =
-        (typeof globalThis !== 'undefined' && globalThis.crypto) ||
-        (typeof global !== 'undefined' && global.crypto) ||
-        null;
+      const c = _webCrypto();
       if (c?.getRandomValues) {
         const buf = new Uint8Array(poolBytes);
         c.getRandomValues(buf);
@@ -105,10 +108,7 @@ export function randomNonceHex(bytes = 12) {
 
   // 1) WebCrypto / polyfilled getRandomValues (after get-random-values import)
   try {
-    const c =
-      (typeof globalThis !== 'undefined' && globalThis.crypto) ||
-      (typeof global !== 'undefined' && global.crypto) ||
-      null;
+    const c = _webCrypto();
     if (c && typeof c.getRandomValues === 'function') {
       const arr = new Uint8Array(n);
       c.getRandomValues(arr);

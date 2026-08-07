@@ -18,7 +18,7 @@ EXPORT = ROOT / "dist-ios-export"
 OUT_IPA = ROOT / "dist" / "ipa" / "CommanderPro.ipa"
 BACKUP = ROOT / "dist" / "ipa" / "CommanderPro-pre-repack-backup.ipa"
 WORK = ROOT / "dist-ipa-work"
-VERSION = "1.5.0"
+VERSION = "1.5.5"
 
 
 def main() -> int:
@@ -62,12 +62,8 @@ def main() -> int:
     print("old version", info.get("CFBundleShortVersionString"), info.get("CFBundleVersion"))
     # Keep marketing version stable (user request); only bump build if missing
     info["CFBundleShortVersionString"] = VERSION
-    bv = str(info.get("CFBundleVersion") or "150")
-    # Keep same build family for 1.4.9 (149) — do not auto-increment on local repack
-    if not bv.isdigit():
-        info["CFBundleVersion"] = "150"
-    else:
-        info["CFBundleVersion"] = bv if int(bv) >= 150 else "150"
+    # Marketing 1.5.5 → build 155 (matches app.json ios.buildNumber)
+    info["CFBundleVersion"] = "155"
     with open(info_path, "wb") as f:
         plistlib.dump(info, f, fmt=plistlib.FMT_BINARY)
     print("new version", info["CFBundleShortVersionString"], "build", info["CFBundleVersion"])
@@ -109,7 +105,7 @@ def main() -> int:
         app_root = app_prefix[: -len("main.jsbundle")]
         pl = z.read(app_root + "Info.plist")
         jb = z.read(app_prefix)
-        print("verify version 1.5.0 in bundle", b"1.5.0" in jb)
+        print("verify version 1.5.5 in bundle", b"1.5.5" in jb)
         print("verify cacheInit / sqlite", b"cacheInit" in jb or b"commander_pro_cache" in jb)
         print("bundle magic", jb[:4])
     print("DONE — install with Sideloadly (re-signs). Version stays", VERSION)
