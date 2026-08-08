@@ -9109,6 +9109,8 @@ function AppInner() {
                       : statsPeriod === 'week'
                         ? t('stats.compare.week')
                         : t('stats.compare.month');
+                  // Core period KPIs only — no redundant ratios (gold/songs per visitor,
+                  // visitor-days, tips/day) that restate tips_gold / visitors / songs.
                   const cards = [
                     {
                       icon: 'cash-outline',
@@ -9151,6 +9153,19 @@ function AppInner() {
                       pct: s.pct_visitors,
                       color: '#34d399',
                     },
+                    // Peak concurrent people in room (from activity samples)
+                    ...(Number(s.people_samples) > 0 || Number(s.people_max) > 0
+                      ? [
+                          {
+                            icon: 'stats-chart-outline',
+                            label: t('stats.peopleMax'),
+                            value: s.people_max ?? 0,
+                            prev: s.prev_people_max ?? 0,
+                            pct: s.pct_people_max,
+                            color: '#2dd4bf',
+                          },
+                        ]
+                      : []),
                     {
                       icon: 'swap-horizontal-outline',
                       label: t('stats.transfers'),
@@ -9167,36 +9182,9 @@ function AppInner() {
                       pct: s.pct_transfers_gold,
                       color: '#22d3ee',
                     },
-                    // tips_per_day removed — duplicated "Tips reçus" on day period
-                    {
-                      icon: 'pulse-outline',
-                      label: t('stats.goldPerVisitor'),
-                      value: s.gold_per_visitor ?? 0,
-                      prev: s.prev_gold_per_visitor ?? 0,
-                      pct: s.pct_gold_per_visitor,
-                      color: '#4ade80',
-                      dec: true,
-                    },
-                    {
-                      icon: 'headset-outline',
-                      label: t('stats.songsPerVisitor'),
-                      value: s.songs_per_visitor ?? 0,
-                      prev: s.prev_songs_per_visitor ?? 0,
-                      pct: s.pct_songs_per_visitor,
-                      color: '#c084fc',
-                      dec: true,
-                    },
-                    // Week/month only: cumulative unique/day sum + active days
+                    // Week/month: how many calendar days had any activity
                     ...(statsPeriod !== 'day'
                       ? [
-                          {
-                            icon: 'layers-outline',
-                            label: t('stats.visitorDays'),
-                            value: s.visitor_days ?? 0,
-                            prev: s.prev_visitor_days ?? 0,
-                            pct: s.pct_visitor_days,
-                            color: '#2dd4bf',
-                          },
                           {
                             icon: 'sunny-outline',
                             label: t('stats.activeDays'),
@@ -9227,6 +9215,16 @@ function AppInner() {
                       )
                     )
                   );
+                  const fmtMinutesHuman = (mins) => {
+                    const m = Math.max(0, Math.floor(Number(mins) || 0));
+                    if (m < 60) return `${m}m`;
+                    const h = Math.floor(m / 60);
+                    const r = m % 60;
+                    if (h < 24) return r ? `${h}h ${r}m` : `${h}h`;
+                    const d = Math.floor(h / 24);
+                    const rh = h % 24;
+                    return rh ? `${d}d ${rh}h` : `${d}d`;
+                  };
                   const boardBlocks = [
                     {
                       key: 'tippers',
@@ -9245,9 +9243,10 @@ function AppInner() {
                     {
                       key: 'room_time',
                       title: t('stats.top.roomTime'),
-                      unit: t('stats.unit.minutes'),
+                      unit: '',
                       color: '#34d399',
                       rows: boards.room_time || [],
+                      formatValue: fmtMinutesHuman,
                     },
                     {
                       key: 'skippers',
@@ -9269,6 +9268,13 @@ function AppInner() {
                       unit: t('stats.unit.gold'),
                       color: '#22d3ee',
                       rows: boards.transfer_out || [],
+                    },
+                    {
+                      key: 'transfer_in',
+                      title: t('stats.top.transferIn'),
+                      unit: t('stats.unit.gold'),
+                      color: '#67e8f9',
+                      rows: boards.transfer_in || [],
                     },
                   ];
                   const rankEntries = Object.entries(ranks || {});
@@ -9452,13 +9458,30 @@ function AppInner() {
                       </View>
                       <View style={[styles.statsLifeRow, { marginTop: 8 }]}>
                         <View style={[styles.statsLifeCard, { borderColor: 'rgba(34,211,238,0.35)' }]}>
-                          <Ionicons name="swap-horizontal" size={18} color="#22d3ee" />
-                          <Text style={styles.statsLifeLabel}>{t('stats.life.transfers')}</Text>
+                          <Ionicons name="arrow-up-circle" size={18} color="#22d3ee" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.transfersOut')}</Text>
                           <Text style={[styles.statsLifeValue, { color: '#22d3ee' }]}>
                             {fmt(life.transfers_out_gold ?? 0)}
                           </Text>
                           <Text style={styles.statsLifeUnit}>{t('stats.unit.gold')}</Text>
                         </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(103,232,249,0.35)' }]}>
+                          <Ionicons name="arrow-down-circle" size={18} color="#67e8f9" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.transfersIn')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#67e8f9' }]}>
+                            {fmt(life.transfers_in_gold ?? 0)}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>{t('stats.unit.gold')}</Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(52,211,153,0.35)' }]}>
+                          <Ionicons name="time" size={18} color="#34d399" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.life.roomTime')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#34d399' }]}>
+                            {fmtMinutesHuman(life.room_minutes_total ?? 0)}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={[styles.statsLifeRow, { marginTop: 8 }]}>
                         <View style={[styles.statsLifeCard, { borderColor: 'rgba(251,191,36,0.35)' }]}>
                           <Ionicons name="people-circle" size={18} color="#fbbf24" />
                           <Text style={styles.statsLifeLabel}>{t('stats.life.tippers')}</Text>
@@ -9471,6 +9494,18 @@ function AppInner() {
                           <Text style={styles.statsLifeLabel}>{t('stats.life.requesters')}</Text>
                           <Text style={[styles.statsLifeValue, { color: '#a78bfa' }]}>
                             {fmt(life.requesters_count ?? 0)}
+                          </Text>
+                        </View>
+                        <View style={[styles.statsLifeCard, { borderColor: 'rgba(148,163,184,0.35)' }]}>
+                          <Ionicons name="information-circle" size={18} color="#94a3b8" />
+                          <Text style={styles.statsLifeLabel}>{t('stats.asOf')}</Text>
+                          <Text style={[styles.statsLifeValue, { color: '#94a3b8', fontSize: 13 }]}>
+                            {statsPayload?.stats?.as_of || '—'}
+                          </Text>
+                          <Text style={styles.statsLifeUnit}>
+                            {statsPayload?.stats?.data_source
+                              ? 'SQL'
+                              : ''}
                           </Text>
                         </View>
                       </View>
@@ -9507,9 +9542,13 @@ function AppInner() {
                                   {row.user}
                                 </Text>
                                 <Text style={[styles.statsBoardVal, { color: b.color }]}>
-                                  {fmt(row.value)}
+                                  {b.formatValue
+                                    ? b.formatValue(row.value)
+                                    : fmt(row.value)}
                                 </Text>
-                                <Text style={styles.statsBoardUnit}>{b.unit}</Text>
+                                {b.unit ? (
+                                  <Text style={styles.statsBoardUnit}>{b.unit}</Text>
+                                ) : null}
                               </View>
                             ))}
                           </View>

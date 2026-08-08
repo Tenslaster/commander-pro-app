@@ -49,7 +49,7 @@ ios-install/
 *-pre-repack-backup.apk
 *-pre-repack-backup.ipa
 
-# Local-only tooling (not needed for APK/IPA CI)
+# Local-only tooling / backend / export junk (NOT on GitHub builds)
 download_server.py
 Start-Download-Server.bat
 Build-APK.bat
@@ -70,6 +70,12 @@ scripts/smoke*
 scripts/upload_*
 scripts/README.md
 assets/_gen_icons.py
+# Built artifacts never belong in git
+*.apk
+*.ipa
+*.aab
+dist/**
+dist-*/
 
 # Editor / local noise
 .idea/
@@ -78,3 +84,6 @@ assets/_gen_icons.py
 *~
 AppBackupDontEdit.js
 SHARE-WITH-FRIEND.txt
+_fix_*.py
+_fix_*.bat
+FIX_*.bat

@@ -1,39 +1,45 @@
-# Commander PRO
+# Commander PRO (mobile app)
 
-**Shipping product:** standalone **APK** + **IPA** (users install from downloads).  
-**Expo Go:** personal testing only (`npm run start:go`) — not the production app.
+Expo / React Native app — **standalone APK + IPA only**.
 
-## Folder map
+Backend / Batch Manager / radio bots live **outside** this repo. This repo is
+build-only source for GitHub Actions.
 
-| Path | What |
-|------|------|
-| `App.js` / `i18n.js` / `notificationBackground.js` | App source |
-| `app.json` / `eas.json` / `package.json` | Expo config (prebuild → native) |
-| `google-services.json` | Firebase Android (FCM) |
-| `credentials/` | **Private** FCM service account (not for git) |
-| `assets/` | Icons, splash |
-| `dist/apk` `dist/ipa` | Installers for the downloads page |
-| `scripts/` | Build, FCM, smoke tests |
-| `download_server.py` | Serves `dist` on port **8787** |
+## What’s in this repo (build essentials)
 
-## Production builds
+| Path | Purpose |
+|------|---------|
+| `App.js`, `i18n.js`, `*.js` helpers | App source |
+| `app.json`, `eas.json`, `package.json` | Expo config |
+| `assets/` | Icons & splash |
+| `google-services.json` | Android FCM |
+| `.github/workflows/` | **Android APK** + **iOS Build** CI |
+| `scripts/ci-patch-android-signing.py` | CI release signing patch |
 
-```bat
-scripts\build-apk.bat
-scripts\build-ipa.bat
-scripts\publish-to-downloads.bat
-Start-Download-Server.bat
-python scripts\smoke_test.py
+Everything else (local `dist/`, download server, repack scripts, credentials)
+is **gitignored** and must not be committed.
+
+## Build on GitHub
+
+| Workflow | Trigger | Artifact |
+|----------|---------|----------|
+| **Android APK** | push to `main` or manual | `CommanderPro.apk` |
+| **iOS Build** | manual (`workflow_dispatch`) | unsigned `.ipa` |
+
+```bash
+# After push to main, Android builds automatically.
+# iOS (example):
+gh workflow run "iOS Build" -f build_id=CommanderPro-156 -f configuration=Release
 ```
 
-Or GitHub Actions: **Android APK** / **iOS Build** workflows → download artifacts into `dist/`.
+Download artifacts from the Actions run page.
 
-Public downloads: https://crew.kingdom.forum/downloads
+## Local (optional)
 
-## Personal testing (Expo Go only)
-
-```bat
-npm run start:go
+```bash
+npm ci
+npx expo start --go
 ```
 
-See `EXPO-GO-URL.txt` if you use the tunnel.
+API URL is baked at build time via `EXPO_PUBLIC_API_URL`  
+(default production: `https://crew.kingdom.forum/api`).
