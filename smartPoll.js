@@ -197,6 +197,19 @@ export function fingerprintProcesses(list) {
   return s;
 }
 
+const RADIO_FP_IDS = [
+  'RADIO1',
+  'RADIO2',
+  'RADIO3',
+  'RADIO4',
+  'RADIO5',
+  'RADIO6',
+  'RADIO7',
+  'RADIO8',
+  'RADIO9',
+  'RADIO10',
+];
+
 /** Fingerprint streams map for current station or whole map. */
 export function fingerprintStreams(map, stationId) {
   if (!map || typeof map !== 'object') return '';
@@ -204,14 +217,27 @@ export function fingerprintStreams(map, stationId) {
     const a = map[stationId];
     return `${stationId}|${a.title || ''}|${a.listeners ?? 'x'}|${a.online ? 1 : 0}|${a.stream_url || ''}`;
   }
-  const keys = Object.keys(map).sort();
-  let s = String(keys.length);
-  for (let i = 0; i < keys.length; i += 1) {
-    const k = keys[i];
+  const RADIO_FP = RADIO_FP_IDS;
+  let n = 0;
+  let s = '';
+  const seen = {};
+  for (let i = 0; i < RADIO_FP.length; i += 1) {
+    const k = RADIO_FP[i];
+    if (map[k] == null) continue;
+    seen[k] = 1;
+    n += 1;
     const a = map[k] || {};
     s += `|${k}:${a.title || ''}:${a.listeners ?? 'x'}:${a.online ? 1 : 0}`;
   }
-  return s;
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length; i += 1) {
+    const k = keys[i];
+    if (seen[k]) continue;
+    n += 1;
+    const a = map[k] || {};
+    s += `|${k}:${a.title || ''}:${a.listeners ?? 'x'}:${a.online ? 1 : 0}`;
+  }
+  return String(n) + s;
 }
 
 /** Cheap log buffer fingerprint (length + edges). */

@@ -170,22 +170,35 @@ const IS_DEV = typeof __DEV__ !== 'undefined' ? !!__DEV__ : false;
 
 /** Compare semver-ish strings: returns -1 / 0 / 1 */
 function compareAppVersions(a, b) {
-  const parse = (v) => {
-    const s = String(v || '0')
-      .split(/[+-]/)[0]
-      .trim();
-    const parts = s.split('.').map((p) => {
-      const m = String(p).match(/^(\d+)/);
-      return m ? parseInt(m[1], 10) : 0;
-    });
-    while (parts.length < 3) parts.push(0);
-    return parts.slice(0, 3);
+  const numAt = (v, start) => {
+    let n = 0;
+    let i = start;
+    const s = String(v || '0');
+    while (i < s.length) {
+      const c = s.charCodeAt(i);
+      if (c < 48 || c > 57) break;
+      n = n * 10 + (c - 48);
+      i += 1;
+    }
+    return n;
   };
-  const aa = parse(a);
-  const bb = parse(b);
-  for (let i = 0; i < 3; i++) {
-    if (aa[i] < bb[i]) return -1;
-    if (aa[i] > bb[i]) return 1;
+  const part = (v, idx) => {
+    const s = String(v || '0');
+    let p = 0;
+    let i = 0;
+    while (i < s.length && p < idx) {
+      const ch = s.charCodeAt(i);
+      if (ch === 46) p += 1;
+      else if (ch === 43 || ch === 45) break;
+      i += 1;
+    }
+    return numAt(s, i);
+  };
+  for (let i = 0; i < 3; i += 1) {
+    const aa = part(a, i);
+    const bb = part(b, i);
+    if (aa < bb) return -1;
+    if (aa > bb) return 1;
   }
   return 0;
 }
@@ -4140,11 +4153,12 @@ function AppInner() {
           const prev = prevStatusRef.current;
           const drops = [];
           const ups = [];
-          procArray.forEach((p) => {
+          for (let i = 0; i < procArray.length; i += 1) {
+            const p = procArray[i];
             if (prev[p.id] === 'RUNNING' && p.status !== 'RUNNING') drops.push(p.name);
             else if (prev[p.id] && prev[p.id] !== 'RUNNING' && p.status === 'RUNNING')
               ups.push(p.name);
-          });
+          }
           if (drops.length === 1) {
             showBanner(`${drops[0]} est hors ligne`, 'warn');
             warnVibrate();
@@ -4158,9 +4172,11 @@ function AppInner() {
           }
         }
         if (n > 0) {
-          prevStatusRef.current = Object.fromEntries(
-            procArray.map((p) => [p.id, p.status])
-          );
+          const nextPrev = {};
+          for (let i = 0; i < procArray.length; i += 1) {
+            nextPrev[procArray[i].id] = procArray[i].status;
+          }
+          prevStatusRef.current = nextPrev;
           prevStatusReadyRef.current = true;
         }
 
@@ -5756,64 +5772,57 @@ function AppInner() {
   const filteredUsers = useMemo(() => {
     const q = usersQuery.trim().toLowerCase().replace(/^@/, '');
     const stationKey = normalizeStationId(effectiveUsersStation) || effectiveUsersStation;
-    let list;
-    if (q && usersSearchHits && usersSearchActiveQuery === q) {
-      list = usersSearchHits;
-    } else if (q) {
-      list = usersList.filter((u) => {
-        const us = normalizeStationId(u.station);
-        if (us && us !== stationKey) return false;
-        return String(u.username || '')
-          .toLowerCase()
-          .includes(q);
-      });
-    } else {
-      list = usersList.filter((u) => {
-        const us = normalizeStationId(u.station);
-        return !us || us === stationKey;
-      });
-    }
     const f = (usersFilter || 'all').toLowerCase();
-    if (f === 'banned' || f === 'ban') list = list.filter((u) => !!u.banned);
-    else if (f === 'ranks' || f === 'ranked' || f === 'staff') {
-      list = list.filter((u) => (u.rank || 'guest').toLowerCase() !== 'guest');
-    } else if (f === 'gold' || f === 'tips' || f === 'tip' || f === 'tiplead') {
-      // Leaderboard: most gold tipped
-      list = list
-        .filter((u) => Number(u.gold_tipped || 0) > 0)
-        .slice()
-        .sort(
-          (a, b) =>
-            Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
-            Number(b.bank || 0) - Number(a.bank || 0) ||
-            String(a.username || '').localeCompare(String(b.username || ''))
-        );
-    } else if (f === 'time' || f === 'room' || f === 'room_time' || f === 'minutes') {
-      // Leaderboard: highest room time first
-      list = list
-        .filter((u) => Number(u.room_minutes || 0) > 0)
-        .slice()
-        .sort(
-          (a, b) =>
-            Number(b.room_minutes || 0) - Number(a.room_minutes || 0) ||
-            Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
-            String(a.username || '').localeCompare(String(b.username || ''))
-        );
-    } else if (f === 'bank' || f === 'balance' || f === 'goldbank') {
-      // Leaderboard: most bank gold
-      list = list
-        .filter((u) => Number(u.bank || 0) > 0)
-        .slice()
-        .sort(
-          (a, b) =>
-            Number(b.bank || 0) - Number(a.bank || 0) ||
-            Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
-            String(a.username || '').localeCompare(String(b.username || ''))
-        );
-    } else if (f !== 'all' && f) {
-      list = list.filter((u) => (u.rank || '').toLowerCase() === f);
+    const src =
+      q && usersSearchHits && usersSearchActiveQuery === q ? usersSearchHits : usersList;
+    const out = [];
+    for (let i = 0; i < src.length; i += 1) {
+      const u = src[i];
+      if (!q || src !== usersSearchHits) {
+        const us = normalizeStationId(u.station);
+        if (us && us !== stationKey) continue;
+      }
+      if (q && src !== usersSearchHits) {
+        if (!String(u.username || '').toLowerCase().includes(q)) continue;
+      }
+      if (f === 'banned' || f === 'ban') {
+        if (!u.banned) continue;
+      } else if (f === 'ranks' || f === 'ranked' || f === 'staff') {
+        if ((u.rank || 'guest').toLowerCase() === 'guest') continue;
+      } else if (f === 'gold' || f === 'tips' || f === 'tip' || f === 'tiplead') {
+        if (!(Number(u.gold_tipped || 0) > 0)) continue;
+      } else if (f === 'time' || f === 'room' || f === 'room_time' || f === 'minutes') {
+        if (!(Number(u.room_minutes || 0) > 0)) continue;
+      } else if (f === 'bank' || f === 'balance' || f === 'goldbank') {
+        if (!(Number(u.bank || 0) > 0)) continue;
+      } else if (f !== 'all' && f) {
+        if ((u.rank || '').toLowerCase() !== f) continue;
+      }
+      out.push(u);
     }
-    return list;
+    if (f === 'gold' || f === 'tips' || f === 'tip' || f === 'tiplead') {
+      out.sort(
+        (a, b) =>
+          Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
+          Number(b.bank || 0) - Number(a.bank || 0) ||
+          String(a.username || '').localeCompare(String(b.username || ''))
+      );
+    } else if (f === 'time' || f === 'room' || f === 'room_time' || f === 'minutes') {
+      out.sort(
+        (a, b) =>
+          Number(b.room_minutes || 0) - Number(a.room_minutes || 0) ||
+          Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
+          String(a.username || '').localeCompare(String(b.username || ''))
+      );
+    } else if (f === 'bank' || f === 'balance' || f === 'goldbank') {
+      out.sort(
+        (a, b) =>
+          Number(b.bank || 0) - Number(a.bank || 0) ||
+          Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
+          String(a.username || '').localeCompare(String(b.username || ''))
+      );
+    }
+    return out;
   }, [
     usersList,
     usersQuery,
