@@ -71,7 +71,9 @@ import {
   fingerprintStreams,
   fingerprintLogs,
   fingerprintNotify,
+  fingerprintStats,
 } from './smartPoll';
+import { tokenDedupeId } from './perfUtils';
 import {
   APP_VERSION,
   DEFAULT_API_URL,
@@ -895,8 +897,10 @@ const formatTime = (ts) => {
 
 /** In-flight GET dedupe (same path+auth) — cuts duplicate status/notify/chat storms */
 const _inflightGet = new Map();
+const DEFAULT_FETCH_TIMEOUT_MS = 20000;
+const MAX_RESPONSE_CHARS = 1_500_000;
 
-async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs } = {}) {
+async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS } = {}) {
   if (!API_URL) {
     const err = new Error('API_URL manquant (EXPO_PUBLIC_API_URL).');
     err.code = 'CONFIG';
@@ -909,7 +913,7 @@ async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs }
   // Reusing the aborted promise made the new call "succeed" as AbortError → empty list.
   const dedupeKey =
     methodU === 'GET' && body === undefined && !signal
-      ? `${path}\0${token || ''}`
+      ? `${path}\0${tokenDedupeId(token)}`
       : null;
   if (dedupeKey && _inflightGet.has(dedupeKey)) {
     return _inflightGet.get(dedupeKey);
@@ -1031,16 +1035,21 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
   // Prefer JSON API responses; HTML/CF pages are network failures
   const ct = response.headers?.get?.('content-type') || '';
   const text = await response.text();
+  if (text && text.length > MAX_RESPONSE_CHARS) {
+    const err = new Error('Réponse trop volumineuse');
+    err.code = 'NETWORK';
+    err.status = response.status;
+    throw err;
+  }
   let parsed = null;
   if (text) {
     try {
       parsed = JSON.parse(text);
     } catch {
-      // Cloudflare HTML / non-JSON error pages
       if (
         !isJsonContentType(ct) ||
         /cloudflare|error code:\s*10\d{2}/i.test(text) ||
-        response.status === 403
+        response.status >= 400
       ) {
         const err = new Error('Accès bloqué (Cloudflare / réseau). Réessayez.');
         err.code = 'NETWORK';
@@ -5311,7 +5320,7 @@ function AppInner() {
         const payload = data && typeof data === 'object' ? data : null;
         if (payload && payload.station && payload.station !== station) return false;
         // Smart: only setState if numbers actually moved
-        const fp = JSON.stringify(payload?.stats || payload || null);
+        const fp = fingerprintStats(payload);
         changed = force || fp !== statsFpRef.current;
         if (changed) {
           statsFpRef.current = fp;

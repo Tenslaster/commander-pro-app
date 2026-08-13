@@ -14,6 +14,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isCacheKindSafe } from './apiSecurity';
+import { cheapCacheFp, payloadLooksSensitive } from './perfUtils';
 
 /**
  * Dynamic require — a static `import 'expo-sqlite'` CRASHES the whole JS bundle
@@ -96,22 +97,22 @@ function hardTtl(kind) {
   return CACHE_HARD_TTL[kind] || CACHE_WEEK_MS;
 }
 
-function touchAccess(entry) {
-  if (entry) entry.lastAccess = Date.now();
+function touchAccess(key, entry) {
+  if (!entry) return;
+  entry.lastAccess = Date.now();
+  // Map insertion order = recency. Re-insert so eviction is O(1).
+  if (key != null && mem.get(key) === entry) {
+    mem.delete(key);
+    mem.set(key, entry);
+  }
 }
 
 function memEvictIfNeeded() {
-  if (mem.size <= MEM_MAX_KEYS) return;
-  const drop = mem.size - MEM_MAX_KEYS + 8;
-  const entries = new Array(mem.size);
-  let i = 0;
-  for (const [k, v] of mem) {
-    entries[i] = [k, v.lastAccess || v.ts || 0];
-    i += 1;
+  while (mem.size > MEM_MAX_KEYS) {
+    const oldest = mem.keys().next().value;
+    if (oldest == null) break;
+    mem.delete(oldest);
   }
-  entries.sort((a, b) => a[1] - b[1]);
-  const n = Math.min(drop, entries.length);
-  for (let j = 0; j < n; j += 1) mem.delete(entries[j][0]);
 }
 
 function compactUserRow(u) {
@@ -493,7 +494,7 @@ export function cachePeek(kind, id = '') {
   const k = fullKey(kind, id);
   const hit = mem.get(k);
   if (!hit || hit.data === undefined) return null;
-  touchAccess(hit);
+  touchAccess(k, hit);
   const ageMs = Date.now() - (hit.ts || 0);
   return {
     data: hit.data,
@@ -508,7 +509,7 @@ export async function cacheGet(kind, id = '') {
   const k = fullKey(kind, id);
   const memHit = mem.get(k);
   if (memHit && memHit.data !== undefined) {
-    touchAccess(memHit);
+    touchAccess(k, memHit);
     const ageMs = Date.now() - (memHit.ts || 0);
     return {
       data: memHit.data,
@@ -601,13 +602,15 @@ export async function cacheSet(kind, id, data, meta = null) {
   const memData =
     kind === 'users' && Array.isArray(data) ? data : payload;
 
+  if (payloadLooksSensitive(kind, payload)) return;
   try {
-    const probe = JSON.stringify(
-      kind === 'users' && Array.isArray(payload)
-        ? payload.slice(0, 20)
-        : payload
-    );
-    if (probe && FORBIDDEN_CACHE_PATTERNS.some((re) => re.test(probe))) {
+    if (
+      kind !== 'users' &&
+      kind !== 'stats' &&
+      kind !== 'status' &&
+      kind !== 'streams' &&
+      FORBIDDEN_CACHE_PATTERNS.some((re) => re.test(String(payload?.error || '')))
+    ) {
       return;
     }
   } catch {
@@ -622,87 +625,15 @@ export async function cacheSet(kind, id, data, meta = null) {
     lastAccess: now,
   };
 
-  // Skip disk if unchanged (cheap fingerprint)
   const prev = mem.get(k);
   if (prev && prev.data !== undefined) {
     try {
-      let same = false;
-      const compareArr = Array.isArray(memData) ? memData : payload;
-      if (Array.isArray(compareArr) && Array.isArray(prev.data)) {
-        const a = prev.data;
-        const b = compareArr;
-        if (a.length === b.length) {
-          if (a.length === 0) same = true;
-          else if (kind === 'status' && a.length <= MAX_STATUS_ROWS) {
-            same = true;
-            for (let i = 0; i < a.length; i += 1) {
-              if (
-                a[i]?.id !== b[i]?.id ||
-                a[i]?.status !== b[i]?.status ||
-                a[i]?.pid !== b[i]?.pid ||
-                !!a[i]?.auto_restart !== !!b[i]?.auto_restart
-              ) {
-                same = false;
-                break;
-              }
-            }
-          } else if (kind === 'users' && a.length > 50) {
-            const mid = a[Math.floor(a.length / 2)];
-            const midB = b[Math.floor(b.length / 2)];
-            same =
-              (a[0]?.id || a[0]?.username) === (b[0]?.id || b[0]?.username) &&
-              (a[a.length - 1]?.id || a[a.length - 1]?.username) ===
-                (b[b.length - 1]?.id || b[b.length - 1]?.username) &&
-              (mid?.id || mid?.username) === (midB?.id || midB?.username) &&
-              (prev.meta?.total ?? a.length) === (metaOut?.total ?? b.length);
-          } else {
-            same =
-              (a[0]?.id || a[0]?.username || a[0]?.text) ===
-                (b[0]?.id || b[0]?.username || b[0]?.text) &&
-              (a[a.length - 1]?.id ||
-                a[a.length - 1]?.username ||
-                a[a.length - 1]?.text) ===
-                (b[b.length - 1]?.id ||
-                  b[b.length - 1]?.username ||
-                  b[b.length - 1]?.text) &&
-              (prev.meta?.total ?? a.length) === (metaOut?.total ?? b.length);
-          }
-        }
-      } else if (
-        kind === 'streams' &&
-        payload &&
-        prev.data &&
-        typeof payload === 'object' &&
-        typeof prev.data === 'object'
-      ) {
-        const ps = prev.data.stations || prev.data;
-        const ns = payload.stations || payload;
-        const pk = Object.keys(ps || {});
-        const nk = Object.keys(ns || {});
-        if (pk.length === nk.length) {
-          same = true;
-          for (let i = 0; i < nk.length; i += 1) {
-            const key = nk[i];
-            const A = ps[key] || {};
-            const B = ns[key] || {};
-            if (
-              A.title !== B.title ||
-              A.listeners !== B.listeners ||
-              A.online !== B.online
-            ) {
-              same = false;
-              break;
-            }
-          }
-        }
-      } else {
-        same =
-          JSON.stringify(prev.data) === JSON.stringify(payload) &&
-          JSON.stringify(prev.meta || null) === JSON.stringify(metaOut || null);
-      }
+      const same =
+        cheapCacheFp(kind, prev.data, prev.meta) ===
+        cheapCacheFp(kind, memData, metaOut);
       if (same) {
         prev.ts = now;
-        touchAccess(prev);
+        touchAccess(k, prev);
         return;
       }
     } catch {

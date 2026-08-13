@@ -233,3 +233,5 @@ export function fingerprintNotify(items) {
   const b = items[items.length - 1];
   return `${items.length}|${a?.id || ''}|${a?.ts || 0}|${b?.id || ''}|${b?.ts || 0}`;
 }
+
+export { fingerprintStats } from './perfUtils';

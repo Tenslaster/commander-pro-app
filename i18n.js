@@ -3,6 +3,8 @@
  * Usage: const t = createT(lang); t('login.title')
  */
 
+import { interpolate } from './perfUtils';
+
 export const LANG_KEY = 'app_lang';
 export const LANGS = ['fr', 'en'];
 
@@ -918,13 +920,8 @@ export function createT(lang) {
   const table = STRINGS[code] || STRINGS.fr;
   const fallback = STRINGS.fr;
   return function t(key, vars) {
-    let s = table[key] ?? fallback[key] ?? key;
-    if (vars && typeof vars === 'object') {
-      Object.keys(vars).forEach((k) => {
-        s = s.replace(new RegExp(`\\{${k}\\}`, 'g'), String(vars[k]));
-      });
-    }
-    return s;
+    const raw = table[key] ?? fallback[key] ?? key;
+    return vars ? interpolate(raw, vars) : raw;
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "iphone-batch-manager",
-  "version": "1.5.7",
+  "version": "1.5.8",
   "main": "index.js",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -30,7 +30,8 @@
     "ios": "expo start --dev-client --ios",
     "web": "expo start --web",
     "build:apk": "eas build -p android --profile apk --non-interactive",
-    "bench": "node scripts/bench-hotpaths.mjs"
+    "bench": "node scripts/bench-hotpaths.mjs",
+    "bench:r2": "node scripts/bench-round2.mjs"
   },
   "private": true,
   "devDependencies": {

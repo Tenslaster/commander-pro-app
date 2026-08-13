@@ -24,6 +24,21 @@ import { assertSecureApiUrl } from './deviceSecurity';
 const IS_EXPO_GO =
   Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
   Constants.appOwnership === 'expo';
+const HDR_PLATFORM =
+  Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
+const HDR_CLIENT = IS_EXPO_GO ? 'expo-go' : 'standalone';
+let _cachedDeviceName = '';
+function _deviceName() {
+  if (_cachedDeviceName) return _cachedDeviceName;
+  _cachedDeviceName = String(
+    Device.modelName || Device.deviceName || Device.modelId || ''
+  ).slice(0, 48);
+  return _cachedDeviceName;
+}
+
+const RE_HEX_TOKEN = /[0-9a-fA-F]{32,128}/g;
+const RE_BEARER = /Bearer\s+\S+/gi;
+const RE_PASSWORD = /password["']?\s*[:=]\s*["']?[^"'\s,}]+/gi;
 
 /** @type {Uint8Array | null} */
 let _noncePool = null;
@@ -199,18 +214,16 @@ export function buildSecureHeaders({
   deviceName = '',
 } = {}) {
   const methodU = String(method || 'GET').toUpperCase();
+  const ver = String(appVersion).slice(0, 32);
   const headers = {
     Accept: 'application/json',
-    'User-Agent': `CommanderPRO/${appVersion} (Expo; ReactNative; ${Platform.OS})`,
-    'X-App-Version': String(appVersion).slice(0, 32),
-    'X-App-Platform':
-      Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown',
+    'User-Agent': `CommanderPRO/${ver} (Expo; ReactNative; ${HDR_PLATFORM})`,
+    'X-App-Version': ver,
+    'X-App-Platform': HDR_PLATFORM,
     'X-Device-Integrity': String(integrity || 'unknown').slice(0, 120),
-    'X-Device-Name': String(
-      deviceName || Device.modelName || Device.deviceName || Device.modelId || ''
-    ).slice(0, 48),
+    'X-Device-Name': String(deviceName || _deviceName()).slice(0, 48),
     'X-Request-Ts': String(requestTimestampSec()),
-    'X-Client': IS_EXPO_GO ? 'expo-go' : 'standalone',
+    'X-Client': HDR_CLIENT,
   };
 
   // Mutating requests get a nonce (never throw — always produce a header)
@@ -250,16 +263,16 @@ export function enforceApiUrlSecurity(apiUrl, { isExpoGo = IS_EXPO_GO } = {}) {
 /** Redact secrets from strings before Alert / logs. */
 export function redactSecrets(text) {
   let s = String(text || '');
-  s = s.replace(/[0-9a-fA-F]{32,128}/g, '[token]');
-  s = s.replace(/Bearer\s+\S+/gi, 'Bearer [token]');
-  s = s.replace(/password["']?\s*[:=]\s*["']?[^"'\s,}]+/gi, 'password:[redacted]');
+  s = s.replace(RE_HEX_TOKEN, '[token]');
+  s = s.replace(RE_BEARER, 'Bearer [token]');
+  s = s.replace(RE_PASSWORD, 'password:[redacted]');
   return s.slice(0, 400);
 }
 
 /** True if response looks like a JSON API error object (not HTML). */
 export function isJsonContentType(contentType) {
   const ct = String(contentType || '').toLowerCase();
-  return !ct || ct.includes('json') || ct.includes('text/plain');
+  return ct.includes('json');
 }
 
 /**

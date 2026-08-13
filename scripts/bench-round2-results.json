@@ -1,0 +1,85 @@
+{
+  "capturedAt": "2026-08-13T07:26:05.189Z",
+  "round": 2,
+  "vs": "1.5.7 post-domain pass",
+  "cases": {
+    "lruEvictO1": {
+      "beforeMs": 16.322400000000002,
+      "afterMs": 10.165700000000008,
+      "fasterPct": 37.719330490614084,
+      "note": "sort-all → Map FIFO pop"
+    },
+    "cacheEqual8kUsers": {
+      "beforeMs": 336.8473,
+      "afterMs": 0.3392000000000053,
+      "fasterPct": 99.89930155295886,
+      "note": "JSON.stringify 8k rows vs edge fingerprint"
+    },
+    "cacheEqualStatsTree": {
+      "beforeMs": 13.786799999999971,
+      "afterMs": 1.9331999999999994,
+      "fasterPct": 85.97789189659673,
+      "note": "full stats JSON vs KPI fingerprint"
+    },
+    "statsPollFingerprint": {
+      "beforeMs": 35.65929999999997,
+      "afterMs": 3.143799999999999,
+      "fasterPct": 91.18378655778436,
+      "note": "every /station_stats poll used to stringify the whole tree"
+    },
+    "urlRewritePrecompiled": {
+      "beforeMs": 67.11430000000007,
+      "afterMs": 47.29430000000002,
+      "fasterPct": 29.53170933765238,
+      "afterOut": [
+        "https://kingdom.lifestyle/stream",
+        "https://kingdom.lifestyle/stream2",
+        "https://kingdom.lifestyle/stream3",
+        "https://kingdom.lifestyle/stream4"
+      ]
+    },
+    "i18nInterpolate": {
+      "beforeMs": 117.66319999999996,
+      "afterMs": 95.57360000000006,
+      "fasterPct": 18.77358426423887,
+      "identical": true
+    },
+    "cacheSecretScan": {
+      "beforeMs": 0.4679999999999609,
+      "afterMs": 0.13450000000000273,
+      "fasterPct": 71.26068376068078,
+      "note": "stringify 8k users vs field probe of 12 rows"
+    },
+    "redactSecrets": {
+      "beforeMs": 68.26490000000001,
+      "afterMs": 68.14920000000006,
+      "fasterPct": 0.16948680800813748,
+      "identical": true
+    },
+    "inflightKeyNoToken": {
+      "beforeMs": 2.4290000000000873,
+      "afterMs": 10.0702,
+      "fasterPct": -314.58213256482657,
+      "note": "map key no longer stores the raw session token"
+    }
+  },
+  "summary": {
+    "timedCases": 9,
+    "unweightedAvgFasterPct": 13.33,
+    "timeWeightedFasterPct": 64.04,
+    "biggest": [
+      {
+        "name": "cacheEqual8kUsers",
+        "fasterPct": 99.9
+      },
+      {
+        "name": "statsPollFingerprint",
+        "fasterPct": 91.2
+      },
+      {
+        "name": "cacheEqualStatsTree",
+        "fasterPct": 86
+      }
+    ]
+  }
+}
