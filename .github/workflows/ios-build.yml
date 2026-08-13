@@ -54,7 +54,7 @@ jobs:
     steps:
       # Node-24-native action majors (same approach as Android APK workflow)
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -62,7 +62,7 @@ jobs:
           xcode-version: latest-stable
 
       - name: Restore DerivedData cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v4
         id: cache-deriveddata
         with:
           path: DerivedData
@@ -83,7 +83,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.detect.outputs.type == 'reactnative' || steps.detect.outputs.type == 'expo'
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
@@ -118,7 +118,7 @@ jobs:
           ls -la ios
 
       - name: Restore CocoaPods repo cache only
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v4
         id: pods-cache
         with:
           # Do NOT restore ios/Pods over a fresh prebuild — stale Pods cause:
@@ -312,7 +312,7 @@ jobs:
           fi
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: ipa
           path: build/*.ipa
@@ -320,14 +320,14 @@ jobs:
           if-no-files-found: error
 
       - name: Save DerivedData cache
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v4
         if: always()
         with:
           path: DerivedData
           key: deriveddata-ios-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json') }}
 
       - name: Save CocoaPods repo cache
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v4
         if: always()
         with:
           path: |
