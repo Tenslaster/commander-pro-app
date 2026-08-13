@@ -108,6 +108,8 @@ export function startSmartLoop(tick, opts) {
   let timer = null;
   let stopped = false;
   let inflight = false;
+  let queued = false;
+  let gen = 0;
   const signal = { aborted: false };
   let consecutiveErrors = 0;
 
@@ -119,35 +121,27 @@ export function startSmartLoop(tick, opts) {
 
   const run = async () => {
     timer = null;
-    if (stopped) return;
+    const myGen = gen;
+    if (stopped || myGen !== gen) return;
     if (!enabled()) {
       schedule(Math.max(budget.peek(), 4000));
       return;
     }
-    if (pauseBg && typeof opts.getAppState === 'function') {
-      const phase = normalizeAppState(opts.getAppState());
-      if (phase === 'background') {
-        const bgMs =
-          typeof budget.bgDelay === 'function'
-            ? budget.bgDelay()
-            : Math.max(budget.peek(), 14000);
-        schedule(bgMs);
-        return;
-      }
-      if (phase === 'inactive') {
-        // iOS: Control Center / phone call UI — slow but don't fully sleep
-        // (status should refresh when user returns without waiting full bg floor)
-        const idleMs =
-          typeof budget.inactiveDelay === 'function'
-            ? budget.inactiveDelay()
-            : Math.max(budget.peek(), 6000);
-        schedule(idleMs);
-        return;
-      }
-      // active: if we just left a long bg delay, budget.boost() is called from App.js
+    const phase =
+      typeof opts.getAppState === 'function'
+        ? normalizeAppState(opts.getAppState())
+        : 'active';
+    // True background only — inactive (Control Center) still ticks at idle delay
+    if (pauseBg && phase === 'background') {
+      const bgMs =
+        typeof budget.bgDelay === 'function'
+          ? budget.bgDelay()
+          : Math.max(budget.peek(), 14000);
+      schedule(bgMs);
+      return;
     }
     if (inflight) {
-      schedule(Math.min(2500, Math.max(800, budget.peek())));
+      queued = true;
       return;
     }
     inflight = true;
@@ -162,13 +156,20 @@ export function startSmartLoop(tick, opts) {
     } finally {
       inflight = false;
     }
-    if (stopped) return;
+    if (stopped || myGen !== gen) return;
     let delay = budget.next(changed);
+    if (phase === 'inactive' && typeof budget.inactiveDelay === 'function') {
+      delay = Math.max(delay, budget.inactiveDelay());
+    }
     if (consecutiveErrors >= 2) {
       delay = Math.min(
         typeof budget.bgDelay === 'function' ? budget.bgDelay() : 20000,
         Math.round(delay * (1 + consecutiveErrors * 0.35))
       );
+    }
+    if (queued) {
+      queued = false;
+      delay = Math.min(delay, 800);
     }
     schedule(delay);
   };
@@ -177,7 +178,9 @@ export function startSmartLoop(tick, opts) {
 
   return () => {
     stopped = true;
+    gen += 1;
     signal.aborted = true;
+    queued = false;
     if (timer) clearTimeout(timer);
     timer = null;
   };

@@ -30,10 +30,24 @@ let _noncePool = null;
 let _noncePoolOff = 0;
 let _nonceWarmPromise = null;
 
+const HEX_LUT = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+
 function _bytesToHex(arr) {
   let out = '';
-  for (let i = 0; i < arr.length; i += 1) out += arr[i].toString(16).padStart(2, '0');
+  for (let i = 0; i < arr.length; i += 1) out += HEX_LUT[arr[i]];
   return out;
+}
+
+let _expoCrypto = undefined;
+function _getExpoCrypto() {
+  if (_expoCrypto !== undefined) return _expoCrypto;
+  try {
+    // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+    _expoCrypto = require('expo-crypto');
+  } catch {
+    _expoCrypto = null;
+  }
+  return _expoCrypto;
 }
 
 function _webCrypto() {
@@ -54,8 +68,7 @@ export async function warmSecureRandom(poolBytes = 512) {
     try {
       // expo-crypto (works on Expo Go + standalone without WebCrypto)
       try {
-        // eslint-disable-next-line global-require, import/no-extraneous-dependencies
-        const ExpoCrypto = require('expo-crypto');
+        const ExpoCrypto = _getExpoCrypto();
         if (ExpoCrypto?.getRandomBytesAsync) {
           const buf = await ExpoCrypto.getRandomBytesAsync(poolBytes);
           _noncePool = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -120,8 +133,7 @@ export function randomNonceHex(bytes = 12) {
 
   // 2) expo-crypto sync API (when available)
   try {
-    // eslint-disable-next-line global-require, import/no-extraneous-dependencies
-    const ExpoCrypto = require('expo-crypto');
+    const ExpoCrypto = _getExpoCrypto();
     if (typeof ExpoCrypto?.getRandomBytes === 'function') {
       const buf = ExpoCrypto.getRandomBytes(n);
       const arr = buf instanceof Uint8Array ? buf : new Uint8Array(buf);

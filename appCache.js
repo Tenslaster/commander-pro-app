@@ -103,19 +103,15 @@ function touchAccess(entry) {
 function memEvictIfNeeded() {
   if (mem.size <= MEM_MAX_KEYS) return;
   const drop = mem.size - MEM_MAX_KEYS + 8;
-  for (let d = 0; d < drop; d += 1) {
-    let oldestKey = null;
-    let oldestTs = Infinity;
-    for (const [k, v] of mem) {
-      const ts = v.lastAccess || v.ts || 0;
-      if (ts < oldestTs) {
-        oldestTs = ts;
-        oldestKey = k;
-      }
-    }
-    if (oldestKey == null) break;
-    mem.delete(oldestKey);
+  const entries = new Array(mem.size);
+  let i = 0;
+  for (const [k, v] of mem) {
+    entries[i] = [k, v.lastAccess || v.ts || 0];
+    i += 1;
   }
+  entries.sort((a, b) => a[1] - b[1]);
+  const n = Math.min(drop, entries.length);
+  for (let j = 0; j < n; j += 1) mem.delete(entries[j][0]);
 }
 
 function compactUserRow(u) {
@@ -221,19 +217,19 @@ function withTimeout(promise, ms, label = 'timeout') {
 async function getDb() {
   if (_sqliteFailed) return null;
   if (_db) return _db;
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = (async () => {
-    if (!SQLite || typeof SQLite.openDatabaseAsync !== 'function') {
-      throw new Error('expo-sqlite unavailable');
-    }
-    // Hard cap so a broken native module never hangs boot (black screen)
-    const db = await withTimeout(
-      SQLite.openDatabaseAsync('commander_pro_cache.db'),
-      1500,
-      'sqlite_open_timeout'
-    );
-    await withTimeout(
-      db.execAsync(`
+  if (!_dbPromise) {
+    _dbPromise = (async () => {
+      try {
+        if (!SQLite || typeof SQLite.openDatabaseAsync !== 'function') {
+          throw new Error('expo-sqlite unavailable');
+        }
+        const db = await withTimeout(
+          SQLite.openDatabaseAsync('commander_pro_cache.db'),
+          1500,
+          'sqlite_open_timeout'
+        );
+        await withTimeout(
+          db.execAsync(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
       CREATE TABLE IF NOT EXISTS cache_kv (
@@ -270,22 +266,19 @@ async function getDb() {
       CREATE INDEX IF NOT EXISTS idx_cusers_station_bank
         ON cache_users(station, bank DESC);
     `),
-      2000,
-      'sqlite_schema_timeout'
-    );
-    _db = db;
-    // One-time AsyncStorage → SQLite migration (legacy) — never block callers
-    migrateFromAsyncStorage(db).catch(() => {});
-    return db;
-  })();
-  try {
-    return await _dbPromise;
-  } catch (e) {
-    _dbPromise = null;
-    _sqliteFailed = true;
-    // Local JS-repack of older APK/IPA may lack the native module — keep L1 + AsyncStorage L2
-    return null;
+          2000,
+          'sqlite_schema_timeout'
+        );
+        _db = db;
+        migrateFromAsyncStorage(db).catch(() => {});
+        return db;
+      } catch {
+        _sqliteFailed = true;
+        return null;
+      }
+    })();
   }
+  return _dbPromise;
 }
 
 async function migrateFromAsyncStorage(db) {
@@ -472,13 +465,25 @@ async function flushDiskPending() {
   const jobs = [];
   pendingDisk.forEach((v, k) => jobs.push([k, v]));
   pendingDisk.clear();
-  for (const [k, job] of jobs) {
-    try {
-      await sqlSet(k, job.kind, job.id, job.ts, job.meta, job.data);
-    } catch {
-      /* L1 still holds data */
+  const writeAll = async () => {
+    for (const [k, job] of jobs) {
+      try {
+        await sqlSet(k, job.kind, job.id, job.ts, job.meta, job.data);
+      } catch {
+        /* L1 still holds data */
+      }
     }
+  };
+  try {
+    const db = await getDb();
+    if (db && typeof db.withTransactionAsync === 'function') {
+      await db.withTransactionAsync(writeAll);
+      return;
+    }
+  } catch {
+    /* fall through */
   }
+  await writeAll();
 }
 
 /**

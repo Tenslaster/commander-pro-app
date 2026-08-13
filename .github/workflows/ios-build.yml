@@ -5,12 +5,15 @@
 name: iOS Build
 
 on:
+  push:
+    branches: [main, master]
   workflow_dispatch:
     inputs:
       build_id:
         description: 'Unique build identifier'
-        required: true
+        required: false
         type: string
+        default: ''
       ios_path:
         description: 'Path to iOS project (Expo prebuild uses ios/)'
         required: false
@@ -31,6 +34,10 @@ on:
         required: false
         type: string
         default: 'Release'
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
 
 # Least privilege for GITHUB_TOKEN (CodeQL actions/missing-workflow-permissions)
 permissions:
@@ -94,7 +101,7 @@ jobs:
       - name: Expo prebuild iOS (production standalone — not Expo Go)
         if: steps.detect.outputs.type == 'expo'
         env:
-          EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
+          EXPO_PUBLIC_API_URL: https://kingdom.lifestyle/api
           NODE_ENV: production
           # Let Expo drive CocoaPods (avoids bare `pod install` deprecation notice path)
           CI: 'true'
@@ -165,19 +172,19 @@ jobs:
 
       - name: Build IPA
         env:
-          BUILD_ID: ${{ inputs.build_id }}
-          IOS_PATH: ${{ inputs.ios_path }}
+          BUILD_ID: ${{ inputs.build_id || format('CommanderPro-{0}', github.run_number) }}
+          IOS_PATH: ${{ inputs.ios_path || 'ios' }}
           SCHEME: ${{ inputs.scheme }}
           PROJECT_TYPE: ${{ steps.detect.outputs.type }}
-          USE_SIGNING: ${{ inputs.use_signing }}
-          CONFIGURATION: ${{ inputs.configuration }}
-          EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
+          USE_SIGNING: ${{ inputs.use_signing || false }}
+          CONFIGURATION: ${{ inputs.configuration || 'Release' }}
+          EXPO_PUBLIC_API_URL: https://kingdom.lifestyle/api
           # Production bundle: Hermes minify ON for Release (smaller + faster startup)
           NODE_ENV: production
           RCT_NO_LAUNCH_PACKAGER: '1'
         run: |
           set -euo pipefail
-          export EXPO_PUBLIC_API_URL="${EXPO_PUBLIC_API_URL:-https://crew.kingdom.forum/api}"
+          export EXPO_PUBLIC_API_URL="${EXPO_PUBLIC_API_URL:-https://kingdom.lifestyle/api}"
           export NODE_ENV=production
           export RCT_NO_LAUNCH_PACKAGER=1
 

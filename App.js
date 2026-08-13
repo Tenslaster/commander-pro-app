@@ -72,6 +72,13 @@ import {
   fingerprintLogs,
   fingerprintNotify,
 } from './smartPoll';
+import {
+  APP_VERSION,
+  DEFAULT_API_URL,
+  DEFAULT_DOWNLOAD_URL,
+  PUBLIC_ORIGIN,
+  rewritePublicUrl,
+} from './appConfig';
 
 /**
  * Runtime client (production = standalone APK / IPA only).
@@ -144,7 +151,6 @@ setupAndroidNotificationChannels();
 
 // Production default baked in so APK/IPA work even when .env is gitignored.
 // Override locally with EXPO_PUBLIC_API_URL in .env if needed (Expo Go testing).
-const DEFAULT_API_URL = 'https://crew.kingdom.forum/api';
 const _rawApiUrl = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
 // Standalone APK/IPA must use HTTPS (no cleartext). Expo Go testing may hit local IP.
 const API_URL = (() => {
@@ -152,17 +158,11 @@ const API_URL = (() => {
   if (!check.ok && IS_STANDALONE) {
     return DEFAULT_API_URL;
   }
-  return _rawApiUrl;
+  return rewritePublicUrl(_rawApiUrl) || _rawApiUrl;
 })();
 /** Base host without trailing /api — used for /api/chat/media/... images */
-const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '');
-
-/** App store / build version — must stay >= API min_app_version (see app_version_policy.json).
- *  Hardcoded first so a stale native Constants value cannot false-trigger FORCE_UPDATE.
- */
-const APP_VERSION = '1.5.5';
+const API_ORIGIN = API_URL.replace(/\/api\/?$/i, '') || PUBLIC_ORIGIN;
 const APP_PLATFORM = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'unknown';
-const DEFAULT_DOWNLOAD_URL = 'https://crew.kingdom.forum/downloads';
 /** Metro / Expo Go only — never log secrets in production APK/IPA */
 const IS_DEV = typeof __DEV__ !== 'undefined' ? !!__DEV__ : false;
 
@@ -628,7 +628,7 @@ const STATION_STREAM_MOUNT = {
   RADIO9: '/stream9',
   RADIO10: '/stream10',
 };
-const STREAM_PUBLIC_BASE_FALLBACK = 'https://crew.kingdom.forum';
+const STREAM_PUBLIC_BASE_FALLBACK = PUBLIC_ORIGIN;
 
 /** Build a stable public Icecast URL for a station (Android + iOS). */
 function resolveStationStreamUrl(station, streamsMap) {
@@ -639,16 +639,7 @@ function resolveStationStreamUrl(station, streamsMap) {
     const mount = STATION_STREAM_MOUNT[st] || '/stream';
     url = `${STREAM_PUBLIC_BASE_FALLBACK}${mount}`;
   }
-  // Icecast sometimes reports http://host:8000/... — force public HTTPS tunnel
-  try {
-    if (/^http:\/\//i.test(url) && /crew\.kingdom\.forum/i.test(url)) {
-      url = url.replace(/^http:\/\//i, 'https://').replace(/:8000(?=\/|$)/, '');
-    }
-  } catch {
-    /* ignore */
-  }
-  // Strip trailing junk / accidental spaces
-  return url.replace(/\s+/g, '').replace(/\/+$/, '') || url;
+  return rewritePublicUrl(url) || url;
 }
 const USER_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin', 'owner', 'dev'];
 const OWNER_ONLY_RANKS = new Set(['owner', 'dev']);
@@ -870,11 +861,16 @@ const mergeProcessList = (prev, next) => {
   if (Array.isArray(next) && next.length === 0 && prev?.length) return prev;
   if (!prev?.length) return next;
   if (processListEqual(prev, next)) return prev;
-  const prevById = new Map(prev.map((p) => [p.id, p]));
-  return next.map((row) => {
+  const prevById = new Map();
+  for (let i = 0; i < prev.length; i += 1) prevById.set(prev[i].id, prev[i]);
+  const n = next.length;
+  const out = new Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const row = next[i];
     const old = prevById.get(row.id);
-    return old && processRowEqual(old, row) ? old : row;
-  });
+    out[i] = old && processRowEqual(old, row) ? old : row;
+  }
+  return out;
 };
 
 const formatUptime = (sec) => {
@@ -1503,14 +1499,16 @@ const LockScreen = ({
   const insets = useSafeAreaInsets();
   const tr = typeof t === 'function' ? t : (k) => k;
   return (
-    <View style={[styles.lockScreen, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
+    <LinearGradient
+      colors={['#020617', '#000000', '#0b1220']}
+      style={[styles.lockScreen, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}
+    >
       <StatusBar
         barStyle="light-content"
         backgroundColor="#000000"
         translucent={IS_ANDROID}
       />
 
-      {/* Language toggle — top of login, always visible on launch */}
       <View style={[styles.langToggleWrap, { top: insets.top + 12 }]} pointerEvents="box-none">
         <Text style={styles.langToggleLabel}>{tr('login.lang')}</Text>
         <View style={styles.langToggleRow}>
@@ -1542,13 +1540,18 @@ const LockScreen = ({
       </View>
 
       <View style={styles.lockBody}>
-        <Ionicons
-          name="lock-closed"
-          size={56}
-          color={loginError ? '#ef4444' : '#38bdf8'}
-          style={{ marginBottom: 16 }}
-        />
+        <View style={styles.lockMark}>
+          <Ionicons
+            name={loginError ? 'lock-closed' : 'radio'}
+            size={28}
+            color={loginError ? '#f87171' : '#38bdf8'}
+          />
+        </View>
+        <Text style={styles.lockBrand}>
+          Commander<Text style={styles.lockBrandPro}> PRO</Text>
+        </Text>
         <Text style={styles.lockTitle}>{tr('login.title')}</Text>
+        <Text style={styles.lockHint}>{tr('login.subtitle')}</Text>
 
         <View style={styles.inputContainer}>
           <TextInput
@@ -1586,7 +1589,10 @@ const LockScreen = ({
         </View>
 
         {loginError ? (
-          <Text style={styles.errorText}>{loginErrorMsg || tr('login.error')}</Text>
+          <View style={styles.loginErrorRow}>
+            <Ionicons name="alert-circle" size={16} color="#f87171" />
+            <Text style={styles.errorText}>{loginErrorMsg || tr('login.error')}</Text>
+          </View>
         ) : null}
 
         <TouchableOpacity
@@ -1594,6 +1600,8 @@ const LockScreen = ({
           onPress={handleLogin}
           disabled={isLoggingIn}
           activeOpacity={0.85}
+          accessibilityRole="button"
+          accessibilityState={{ busy: !!isLoggingIn }}
         >
           {isLoggingIn ? (
             <ActivityIndicator color="#000000" />
@@ -1612,7 +1620,7 @@ const LockScreen = ({
           </TouchableOpacity>
         ) : null}
       </View>
-    </View>
+    </LinearGradient>
   );
 };
 
@@ -2052,7 +2060,10 @@ const ProcessCard = React.memo(
     prev.onSendCommand === next.onSendCommand &&
     prev.onLongPress === next.onLongPress &&
     prev.onEditRoom === next.onEditRoom &&
-    prev.onEditApiKey === next.onEditApiKey
+    prev.onEditApiKey === next.onEditApiKey &&
+    prev.onListenStation === next.onListenStation &&
+    prev.listenStationId === next.listenStationId &&
+    prev.listenPlaying === next.listenPlaying
 );
 
 /**
@@ -2220,13 +2231,18 @@ const UserRow = React.memo(
 const BottomNavItem = React.memo(
   ({ active, icon, iconActive, color, label, badge, onPress }) => (
     <Pressable
-      style={({ pressed }) => [styles.bottomNavItem, pressed && { opacity: 0.7 }]}
+      style={({ pressed }) => [
+        styles.bottomNavItem,
+        active && { backgroundColor: `${color}1f` },
+        pressed && { opacity: 0.72 },
+      ]}
       onPress={onPress}
       android_ripple={{ color: 'rgba(255,255,255,0.08)', borderless: true }}
       accessibilityRole="tab"
       accessibilityState={{ selected: !!active }}
       accessibilityLabel={label}
     >
+      {active ? <View style={[styles.bottomNavPip, { backgroundColor: color }]} /> : null}
       <View>
         <Ionicons
           name={active ? iconActive || icon : icon}
@@ -6935,12 +6951,14 @@ function AppInner() {
           streamsInflightRef.current = false;
           fetchStatus(false);
           fetchNotifications({ silent: true, force: true });
-          // streams refreshed by smart loop after budget.boost() above
-          fetchChatChannels();
-          if (userRoleRef.current === 'OWNER') fetchAdmin();
-          // Resume audio session if user was listening (iOS often suspends AV)
+          const tokenAtResume = authTokenRef.current;
+          setTimeout(() => {
+            if (!mountedRef.current || authTokenRef.current !== tokenAtResume) return;
+            fetchChatChannels();
+            if (userRoleRef.current === 'OWNER') fetchAdmin();
+          }, 160);
           if (!IS_EXPO_GO && !pushOkRef.current) {
-            registerForPushNotificationsAsync(authTokenRef.current);
+            registerForPushNotificationsAsync(tokenAtResume);
           }
           if (!IS_EXPO_GO) {
             startBackgroundNotifyFetch().catch(() => {});
@@ -8391,9 +8409,13 @@ function AppInner() {
 
   if (!isReady) {
     return (
-      <View style={styles.bootScreen}>
-        <ActivityIndicator size="large" color="#38bdf8" />
-      </View>
+      <LinearGradient colors={['#020617', '#000000']} style={styles.bootScreen}>
+        <Text style={styles.bootBrand}>
+          Commander<Text style={styles.bootBrandPro}> PRO</Text>
+        </Text>
+        <ActivityIndicator size="large" color="#38bdf8" style={{ marginTop: 22 }} />
+        <Text style={styles.bootHint}>{t('boot.loading')}</Text>
+      </LinearGradient>
     );
   }
 
@@ -8490,10 +8512,29 @@ function AppInner() {
             <View style={styles.headerBadgeRow}>
               <View
                 style={[
-                  styles.connDot,
-                  { backgroundColor: connectionOk ? '#10b981' : '#ef4444' },
+                  styles.connChip,
+                  { backgroundColor: connectionOk ? 'rgba(16,185,129,0.16)' : 'rgba(239,68,68,0.16)' },
                 ]}
-              />
+              >
+                <View
+                  style={[
+                    styles.connDot,
+                    { backgroundColor: connectionOk ? '#10b981' : '#ef4444', marginRight: 0 },
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.connChipText,
+                    { color: connectionOk ? '#6ee7b7' : '#fca5a5' },
+                  ]}
+                >
+                  {connectionOk
+                    ? latencyMs != null
+                      ? `${latencyMs}ms`
+                      : t('header.online')
+                    : t('header.offline')}
+                </Text>
+              </View>
               <Text style={styles.headerSubtitle} numberOfLines={1}>
                 {isOwner
                   ? t('header.owner')
@@ -8501,8 +8542,6 @@ function AppInner() {
                     ? `${appUsername} · ${userRole}`
                     : userRole}
                 {appLevel && !isMasterLogin ? ` · ${appLevel}` : ''}
-                {latencyMs != null ? ` · ${latencyMs}ms` : ''}
-                {!connectionOk ? ` · ${t('header.offline')}` : ''}
                 {safeMainTab === 'chat' ? ` · ${t('header.chat')}` : ''}
                 {safeMainTab === 'users' ? ` · ${effectiveUsersStation}` : ''}
                 {safeMainTab === 'stats' ? ` · ${effectiveStatsStation}` : ''}
@@ -12388,6 +12427,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  bootBrand: {
+    color: '#38bdf8',
+    fontSize: 28,
+    fontWeight: '900',
+    letterSpacing: -0.6,
+  },
+  bootBrandPro: { color: '#f8fafc' },
+  bootHint: {
+    color: '#64748b',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 14,
+  },
   forceUpdateScreen: {
     flex: 1,
     backgroundColor: '#05070c',
@@ -12555,8 +12607,33 @@ const styles = StyleSheet.create({
   langChipTextActive: {
     color: '#000',
   },
-  lockTitle: { color: 'white', fontSize: 24, fontWeight: '800', marginBottom: 28 },
-  lockHint: { color: '#64748b', fontSize: 13, marginBottom: 28 },
+  lockMark: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    backgroundColor: 'rgba(56,189,248,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(56,189,248,0.28)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  lockBrand: {
+    color: '#38bdf8',
+    fontSize: 26,
+    fontWeight: '900',
+    letterSpacing: -0.6,
+    marginBottom: 6,
+  },
+  lockBrandPro: { color: '#f8fafc' },
+  lockTitle: { color: '#e2e8f0', fontSize: 20, fontWeight: '800', marginBottom: 6 },
+  lockHint: { color: '#64748b', fontSize: 13, marginBottom: 24, textAlign: 'center' },
+  loginErrorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 12,
+  },
   inputContainer: {
     width: '88%',
     maxWidth: 360,
@@ -12575,7 +12652,7 @@ const styles = StyleSheet.create({
     // Android: avoid odd underline / padding quirks
     paddingVertical: IS_ANDROID ? 8 : 0,
   },
-  errorText: { color: '#ef4444', fontSize: 14, fontWeight: 'bold', marginBottom: 12 },
+  errorText: { color: '#f87171', fontSize: 13, fontWeight: '700' },
   loginBtn: {
     flexDirection: 'row',
     backgroundColor: '#38bdf8',
@@ -12607,8 +12684,17 @@ const styles = StyleSheet.create({
   },
   headerTextBlock: { flex: 1, marginRight: 10, minWidth: 0 },
   headerTitle: { color: '#38bdf8', fontSize: 22, fontWeight: '900', letterSpacing: -0.5 },
-  headerBadgeRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
+  headerBadgeRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 8 },
   connDot: { width: 7, height: 7, borderRadius: 4, marginRight: 6 },
+  connChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  connChipText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.2 },
   headerSubtitle: { color: '#94a3b8', fontSize: 11, fontWeight: '600', flexShrink: 1 },
   globalActions: { flexDirection: 'row', gap: 8, flexShrink: 0 },
   globalBtn: {
@@ -13036,6 +13122,13 @@ const styles = StyleSheet.create({
   },
   bottomNavLabel: { color: '#64748b', fontSize: 10, fontWeight: '700', letterSpacing: 0.2 },
   bottomNavLabelActive: { color: '#38bdf8' },
+  bottomNavPip: {
+    position: 'absolute',
+    top: 2,
+    width: 14,
+    height: 3,
+    borderRadius: 2,
+  },
 
   chatTab: { flex: 1, minHeight: 0 },
   channelRow: {

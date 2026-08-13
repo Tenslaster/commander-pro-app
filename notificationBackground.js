@@ -16,15 +16,14 @@ import * as BackgroundFetch from 'expo-background-fetch';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
+import { APP_VERSION, DEFAULT_API_URL } from './appConfig';
 
 export const BG_NOTIFY_TASK = 'COMMANDER_PRO_BG_NOTIFY';
 const SESSION_TOKEN_KEY = 'session_token';
 const BG_LAST_TS_KEY = 'bg_notify_last_ts';
-const API_URL = (
-  process.env.EXPO_PUBLIC_API_URL || 'https://crew.kingdom.forum/api'
-).replace(/\/+$/, '');
-const APP_VERSION = '1.5.5';
+const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/+$/, '');
 const CHANNEL = 'commander-pro';
+let _bgInflight = null;
 
 async function ensureAndroidChannel() {
   if (Platform.OS !== 'android') return;
@@ -45,7 +44,14 @@ async function ensureAndroidChannel() {
 }
 
 async function fetchAndNotify() {
-  // iOS Keychain + Android EncryptedSharedPreferences (default SecureStore)
+  if (_bgInflight) return _bgInflight;
+  _bgInflight = _fetchAndNotifyOnce().finally(() => {
+    _bgInflight = null;
+  });
+  return _bgInflight;
+}
+
+async function _fetchAndNotifyOnce() {
   const token = await SecureStore.getItemAsync(SESSION_TOKEN_KEY);
   if (!token) {
     return BackgroundFetch.BackgroundFetchResult.NoData;
@@ -97,18 +103,15 @@ async function fetchAndNotify() {
     .filter((it) => it && Number(it.ts) > lastTs)
     .sort((a, b) => Number(a.ts) - Number(b.ts));
 
-  const maxTs = Math.max(
-    lastTs,
-    ...items.map((it) => Number(it.ts) || 0)
-  );
-  await SecureStore.setItemAsync(BG_LAST_TS_KEY, String(maxTs));
-
   if (fresh.length === 0) {
+    const quietMax = Math.max(lastTs, ...items.map((it) => Number(it.ts) || 0));
+    if (quietMax > lastTs) {
+      await SecureStore.setItemAsync(BG_LAST_TS_KEY, String(quietMax));
+    }
     return BackgroundFetch.BackgroundFetchResult.NoData;
   }
 
   await ensureAndroidChannel();
-  // Cap to avoid spam if many queued
   const batch = fresh.slice(-8);
   for (const it of batch) {
     await Notifications.scheduleNotificationAsync({
@@ -126,6 +129,12 @@ async function fetchAndNotify() {
       trigger: null,
     });
   }
+
+  const maxTs = Math.max(
+    lastTs,
+    ...batch.map((it) => Number(it.ts) || 0)
+  );
+  await SecureStore.setItemAsync(BG_LAST_TS_KEY, String(maxTs));
 
   return BackgroundFetch.BackgroundFetchResult.NewData;
 }

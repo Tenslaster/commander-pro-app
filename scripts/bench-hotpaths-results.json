@@ -1,0 +1,112 @@
+{
+  "capturedAt": "2026-08-13T07:06:00.621Z",
+  "appVersionAfter": "1.5.7",
+  "domainAfter": "https://kingdom.lifestyle",
+  "domainBefore": "https://crew.kingdom.forum (CI + some fallbacks)",
+  "cases": {
+    "lruEvict": {
+      "beforeMs": 348.8269,
+      "afterMs": 13.612700000000018,
+      "fasterPct": 96.0975773370689,
+      "beforeSize": 112,
+      "afterSize": 112,
+      "note": "O(n²) scan-per-drop → single sort + slice"
+    },
+    "fingerprintProcesses": {
+      "beforeMs": 141.77539999999993,
+      "afterMs": 125.39560000000006,
+      "fasterPct": 11.553344233202575,
+      "identical": true
+    },
+    "fingerprintStreams": {
+      "beforeMs": 49.35289999999998,
+      "afterMs": 50.77019999999993,
+      "fasterPct": -2.8717664007585277,
+      "identical": true,
+      "bothIdentical": true
+    },
+    "mergeProcessList": {
+      "beforeMs": 44.38109999999995,
+      "afterMs": 35.035799999999995,
+      "fasterPct": 21.056936398602026,
+      "identityReuseSame": true
+    },
+    "adaptiveBudget": {
+      "beforeMs": 4.779300000000035,
+      "afterMs": 3.903099999999995,
+      "fasterPct": 18.33322871550297,
+      "note": "Same math — control (should be ~0%)"
+    },
+    "smartLoopInactiveTicks": {
+      "beforeTicks": 0,
+      "afterTicks": 8,
+      "beforeOverlaps": 0,
+      "afterOverlaps": 0,
+      "beforeMaxLive": 0,
+      "afterMaxLive": 1,
+      "wallMs": 180.14699999999993,
+      "note": "BEFORE skips ticks while inactive; AFTER still works at idle delay. Overlaps must stay 0 live."
+    },
+    "smartLoopNoOverlap": {
+      "beforeMaxLive": 1,
+      "afterMaxLive": 1,
+      "pass": true
+    },
+    "urlRewrite": {
+      "beforeMs": 29.835199999999986,
+      "afterMs": 56.990499999999884,
+      "fasterPct": -91.01765699576309,
+      "beforeOut": [
+        "https://crew.kingdom.forum/stream",
+        "https://crew.kingdom.forum/stream2",
+        "https://kingdom.lifestyle/stream3",
+        "http://kingdom.lifestyle:8000/stream4"
+      ],
+      "afterOut": [
+        "https://kingdom.lifestyle/stream",
+        "https://kingdom.lifestyle/stream2",
+        "https://kingdom.lifestyle/stream3",
+        "https://kingdom.lifestyle/stream4"
+      ],
+      "oldHostLeftBefore": true,
+      "oldHostLeftAfter": false
+    },
+    "nonceHex": {
+      "beforeMs": 19.890800000000127,
+      "afterMs": 5.060999999999922,
+      "fasterPct": 74.55607617592108,
+      "identical": true
+    },
+    "inflightDedupe": {
+      "beforeMs": 12.000500000000102,
+      "afterMs": 16.185400000000072,
+      "fasterPct": -34.87271363693125,
+      "createdBefore": 8,
+      "createdAfter": 8
+    },
+    "sqliteOpenSingleflight": {
+      "beforeMs": 10.385299999999916,
+      "afterMs": 8.717499999999973,
+      "fasterPct": 16.059237576189002,
+      "beforeOpens": 1,
+      "afterOpens": 1,
+      "beforeThrownToCallers": 39,
+      "afterNulls": 40,
+      "note": "AFTER never rejects waiters; one open attempt; null on failure"
+    },
+    "domainCutover": {
+      "beforeDefault": "https://crew.kingdom.forum/api (committed CI + previous App.js)",
+      "afterDefault": "https://kingdom.lifestyle/api",
+      "oldHostStillRewritten": "https://kingdom.lifestyle/stream",
+      "newHostUntouched": "https://kingdom.lifestyle/stream2"
+    }
+  },
+  "summary": {
+    "timedCases": 9,
+    "avgFasterPct": 12.1,
+    "inactiveTickFix": true,
+    "noOverlap": true,
+    "oldHostGone": true,
+    "sqliteWaitersSafe": true
+  }
+}

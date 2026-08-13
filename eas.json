@@ -7,7 +7,7 @@
     "development": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://crew.kingdom.forum/api"
+        "EXPO_PUBLIC_API_URL": "https://kingdom.lifestyle/api"
       },
       "android": {
         "buildType": "apk"
@@ -16,7 +16,7 @@
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://crew.kingdom.forum/api"
+        "EXPO_PUBLIC_API_URL": "https://kingdom.lifestyle/api"
       },
       "android": {
         "buildType": "apk"
@@ -25,7 +25,7 @@
     "apk": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://crew.kingdom.forum/api"
+        "EXPO_PUBLIC_API_URL": "https://kingdom.lifestyle/api"
       },
       "android": {
         "buildType": "apk"
@@ -34,7 +34,7 @@
     "ipa": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://crew.kingdom.forum/api"
+        "EXPO_PUBLIC_API_URL": "https://kingdom.lifestyle/api"
       },
       "ios": {
         "simulator": false
@@ -43,7 +43,7 @@
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://crew.kingdom.forum/api"
+        "EXPO_PUBLIC_API_URL": "https://kingdom.lifestyle/api"
       },
       "android": {
         "buildType": "app-bundle"

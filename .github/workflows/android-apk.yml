@@ -9,6 +9,10 @@ on:
   push:
     branches: [main, master]
 
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 # Least privilege for GITHUB_TOKEN (CodeQL actions/missing-workflow-permissions)
 permissions:
   contents: read
@@ -47,7 +51,7 @@ jobs:
 
       - name: Expo prebuild Android (production)
         env:
-          EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
+          EXPO_PUBLIC_API_URL: https://kingdom.lifestyle/api
           NODE_ENV: production
         run: |
           set -euo pipefail
@@ -73,7 +77,7 @@ jobs:
       - name: Gradle assembleRelease (standalone APK)
         working-directory: android
         env:
-          EXPO_PUBLIC_API_URL: https://crew.kingdom.forum/api
+          EXPO_PUBLIC_API_URL: https://kingdom.lifestyle/api
           NODE_ENV: production
         run: |
           set -euo pipefail

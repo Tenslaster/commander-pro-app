@@ -10,6 +10,7 @@ const STRINGS = {
   fr: {
     'login.title': 'Accès sécurisé',
     'login.hint': 'Commander PRO',
+    'login.subtitle': 'Radios · Chat · Contrôle en temps réel',
     'login.username': 'Nom d’utilisateur (optionnel)',
     'login.password': 'Mot de passe…',
     'login.button': 'Connexion',
@@ -52,6 +53,7 @@ const STRINGS = {
 
     'header.owner': 'OWNER',
     'header.offline': 'hors ligne',
+    'header.online': 'en ligne',
     'header.chat': 'messagerie',
 
     'tab.chat': 'Chat',
@@ -460,6 +462,7 @@ const STRINGS = {
   en: {
     'login.title': 'Secure access',
     'login.hint': 'Commander PRO',
+    'login.subtitle': 'Radios · Chat · Live control',
     'login.username': 'Username (optional)',
     'login.password': 'Password…',
     'login.button': 'Sign in',
@@ -502,6 +505,7 @@ const STRINGS = {
 
     'header.owner': 'OWNER',
     'header.offline': 'offline',
+    'header.online': 'online',
     'header.chat': 'messaging',
 
     'tab.chat': 'Chat',

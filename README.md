@@ -24,12 +24,12 @@ is **gitignored** and must not be committed.
 | Workflow | Trigger | Artifact |
 |----------|---------|----------|
 | **Android APK** | push to `main` or manual | `CommanderPro.apk` |
-| **iOS Build** | manual (`workflow_dispatch`) | unsigned `.ipa` |
+| **iOS Build** | push to `main` or manual | unsigned `.ipa` |
 
 ```bash
-# After push to main, Android builds automatically.
-# iOS (example):
-gh workflow run "iOS Build" -f build_id=CommanderPro-156 -f configuration=Release
+# After push to main, both APK and IPA build automatically.
+# Manual iOS (example):
+gh workflow run "iOS Build" -f build_id=CommanderPro-157 -f configuration=Release
 ```
 
 Download artifacts from the Actions run page.
@@ -42,4 +42,4 @@ npx expo start --go
 ```
 
 API URL is baked at build time via `EXPO_PUBLIC_API_URL`  
-(default production: `https://crew.kingdom.forum/api`).
+(default production: `https://kingdom.lifestyle/api`).
