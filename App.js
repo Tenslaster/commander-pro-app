@@ -401,7 +401,15 @@ const APP_LEVEL_PRESETS = {
   // Admin = full radio ops including manage_users; never auto-include security
   admin: APP_PERM_KEYS.filter((k) => k !== 'security'),
 };
-const POLL_PLAYLIST_MS = 7000;
+const POLL_PLAYLIST_MS = 20000;
+const PLAYLIST_DL_STALE_S = 180;
+
+function isPlaylistDownloadBusy(dl) {
+  if (!dl || dl.status !== 'downloading') return false;
+  const started = Number(dl.started_at) || 0;
+  if (started && Date.now() / 1000 - started > PLAYLIST_DL_STALE_S) return false;
+  return true;
+}
 const ALERTS_KEY = 'status_alerts_enabled';
 const NOTIFY_READ_TS_KEY = 'notify_last_read_ts';
 /** Old large feed cache — SecureStore max ~2048 bytes; we only delete this key now */
@@ -1060,7 +1068,10 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
     try {
       parsed = await response.json();
     } catch {
-      parsed = null;
+      const err = new Error('Réponse invalide');
+      err.code = 'NETWORK';
+      err.status = response.status;
+      throw err;
     }
   } else {
     text = await response.text();
@@ -1131,6 +1142,13 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
     err.code = 'HTTP';
     err.status = response.status;
     err.serverError = serverMsg || null;
+    throw err;
+  }
+
+  if (parsed == null) {
+    const err = new Error('Réponse vide');
+    err.code = 'NETWORK';
+    err.status = response.status;
     throw err;
   }
 
@@ -2612,6 +2630,7 @@ function AppInner() {
   const chatChannelsInflightRef = useRef(false);
   const usersFilterRef = useRef('all');
   const statsStationRef = useRef('RADIO1');
+  const playlistStationRef = useRef('RADIO1');
   const notifyFilterRef = useRef('ALL');
   const notifyStationRef = useRef('ALL');
   const connectionOkRef = useRef(true);
@@ -2640,6 +2659,10 @@ function AppInner() {
   useEffect(() => {
     statsStationRef.current = statsStation;
   }, [statsStation]);
+
+  useEffect(() => {
+    playlistStationRef.current = playlistStation;
+  }, [playlistStation]);
 
   useEffect(() => {
     notifyFilterRef.current = notifyFilter;
@@ -5325,9 +5348,16 @@ function AppInner() {
     (st) => {
       if (!isOwner) return;
       if (!STATION_IDS.includes(st) || st === playlistStation) return;
-      setPlaylistSongs([]);
-      setPlaylistDownload(null);
+      playlistStationRef.current = st;
       setPlaylistQuery('');
+      const peek = cachePeek('playlist', st);
+      if (cacheUsable(peek) && peek.data && Array.isArray(peek.data.songs) && peek.data.songs.length) {
+        setPlaylistSongs(peek.data.songs);
+        setPlaylistDownload(peek.data.download || null);
+      } else {
+        setPlaylistSongs([]);
+        setPlaylistDownload(null);
+      }
       setPlaylistStation(st);
     },
     [isOwner, playlistStation]
@@ -5443,10 +5473,10 @@ function AppInner() {
       const role = userRoleRef.current || '';
       const station =
         role === 'OWNER'
-          ? playlistStation
+          ? playlistStationRef.current
           : STATION_IDS.includes(role)
             ? role
-            : playlistStation;
+            : playlistStationRef.current;
       if (!station || !STATION_IDS.includes(station)) {
         playlistInflightRef.current = false;
         return;
@@ -5465,11 +5495,15 @@ function AppInner() {
       try {
         const data = await apiFetch(
           `/playlist?station=${encodeURIComponent(station)}`,
-          { token, timeoutMs: 15000 }
+          { token, timeoutMs: 30000 }
         );
         if (!mountedRef.current) return;
-        const returned = data?.station || station;
-        if (role === 'OWNER' && returned !== playlistStation) return;
+        const returned = normalizeStationId(data?.station) || station;
+        const expected =
+          role === 'OWNER'
+            ? normalizeStationId(playlistStationRef.current)
+            : station;
+        if (expected && returned !== expected) return;
         const songs = Array.isArray(data?.songs) ? data.songs : [];
         setPlaylistSongs(songs);
         setPlaylistDownload(data?.download || null);
@@ -5477,7 +5511,10 @@ function AppInner() {
           songs,
           download: data?.download || null,
         }).catch(() => {});
-        if (role !== 'OWNER' && returned) setPlaylistStation(returned);
+        if (role !== 'OWNER' && returned) {
+          playlistStationRef.current = returned;
+          setPlaylistStation(returned);
+        }
       } catch (error) {
         if (error.code === 'UNAUTHORIZED') {
           handleAuthFailure('playlist');
@@ -5491,7 +5528,7 @@ function AppInner() {
         if (mountedRef.current && !silent) setPlaylistLoading(false);
       }
     },
-    [canPlaylist, playlistStation, handleLogout, t]
+    [canPlaylist, handleAuthFailure, t]
   );
 
   const addPlaylistSong = useCallback(async () => {
@@ -5502,7 +5539,7 @@ function AppInner() {
       Alert.alert(t('playlist.add'), t('playlist.needQuery'));
       return;
     }
-    if (playlistDownload?.status === 'downloading') {
+    if (isPlaylistDownloadBusy(playlistDownload)) {
       Alert.alert(t('playlist.add'), t('playlist.busy'));
       return;
     }
@@ -9815,7 +9852,7 @@ function AppInner() {
                       {...darkInputProps}
                       value={playlistQuery}
                       onChangeText={setPlaylistQuery}
-                      editable={!playlistAdding && playlistDownload?.status !== 'downloading'}
+                      editable={!playlistAdding && !isPlaylistDownloadBusy(playlistDownload)}
                       onSubmitEditing={addPlaylistSong}
                       returnKeyType="go"
                     />
@@ -9824,28 +9861,35 @@ function AppInner() {
                         styles.playlistAddBtn,
                         (playlistAdding ||
                           !playlistQuery.trim() ||
-                          playlistDownload?.status === 'downloading') && { opacity: 0.5 },
+                          isPlaylistDownloadBusy(playlistDownload)) && { opacity: 0.5 },
                       ]}
                       onPress={addPlaylistSong}
                       disabled={
                         playlistAdding ||
                         !playlistQuery.trim() ||
-                        playlistDownload?.status === 'downloading'
+                        isPlaylistDownloadBusy(playlistDownload)
                       }
                     >
-                      {playlistAdding || playlistDownload?.status === 'downloading' ? (
+                      {playlistAdding || isPlaylistDownloadBusy(playlistDownload) ? (
                         <ActivityIndicator color="#000" size="small" />
                       ) : (
                         <Ionicons name="add" size={22} color="#000" />
                       )}
                     </TouchableOpacity>
                   </View>
-                  {playlistDownload?.status === 'downloading' ? (
+                  {isPlaylistDownloadBusy(playlistDownload) ? (
                     <View style={styles.playlistDlBanner}>
                       <ActivityIndicator color="#f472b6" size="small" />
                       <Text style={styles.playlistDlText} numberOfLines={2}>
                         {t('playlist.downloading')}
                         {playlistDownload.query ? ` · ${playlistDownload.query}` : ''}
+                      </Text>
+                    </View>
+                  ) : playlistDownload?.status === 'error' && playlistDownload.error ? (
+                    <View style={styles.playlistDlBanner}>
+                      <Ionicons name="warning-outline" size={16} color="#fbbf24" />
+                      <Text style={styles.playlistDlText} numberOfLines={3}>
+                        {playlistDownload.error}
                       </Text>
                     </View>
                   ) : null}
