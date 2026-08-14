@@ -70,7 +70,7 @@ export const CACHE_HARD_TTL = Object.fromEntries(
 );
 
 const MEM_MAX_KEYS = 120;
-const MAX_USERS_CACHE = 100_000;
+const MAX_USERS_CACHE = 800;
 const MAX_NOTIFY_CACHE = 400;
 const MAX_PLAYLIST_SONGS = 800;
 const MAX_STATUS_ROWS = 200;
@@ -117,7 +117,7 @@ function memEvictIfNeeded() {
 
 function compactUserRow(u) {
   if (!u || typeof u !== 'object') return u;
-  return {
+  const row = {
     id: u.id,
     username: u.username,
     rank: u.rank || 'guest',
@@ -129,9 +129,12 @@ function compactUserRow(u) {
     room_minutes: u.room_minutes ?? 0,
     room_time: u.room_time || '0m',
     station: u.station,
-    gold_transferred_out: u.gold_transferred_out ?? 0,
-    gold_transferred_in: u.gold_transferred_in ?? 0,
   };
+  const xOut = u.gold_transferred_out | 0;
+  const xIn = u.gold_transferred_in | 0;
+  if (xOut) row.gold_transferred_out = xOut;
+  if (xIn) row.gold_transferred_in = xIn;
+  return row;
 }
 
 function compactStatusRow(p) {

@@ -35,7 +35,6 @@ import Constants, { ExecutionEnvironment } from 'expo-constants';
 import * as Device from 'expo-device';
 import * as SecureStore from 'expo-secure-store';
 import {
-  assessDeviceIntegrity,
   assessDeviceIntegrityFull,
   assertSecureApiUrl,
 } from './deviceSecurity';
@@ -59,7 +58,6 @@ import {
   cacheClearAll,
   cachePeek,
   cacheUsable,
-  cacheNeedsRefresh,
   cacheRemove,
   cacheFlush,
   cacheInit,
@@ -73,7 +71,7 @@ import {
   fingerprintNotify,
   fingerprintStats,
 } from './smartPoll';
-import { tokenDedupeId } from './perfUtils';
+import { tokenDedupeId, formatRoomMinutes, applyUsersListFilter } from './perfUtils';
 import {
   APP_VERSION,
   DEFAULT_API_URL,
@@ -674,9 +672,10 @@ const USER_LIST_FILTER_DEFS = [
 ];
 /** Users-tab filters that act as sorted leaderboards */
 const USER_LEADERBOARD_FILTERS = new Set(['gold', 'time', 'bank']);
-/** Browse / search page sizes (radios can exceed 2k users) */
-const USERS_BROWSE_LIMIT = 15000;
-const USERS_SEARCH_LIMIT = 8000;
+/** Browse / search page sizes — never dump the full 13k RADIO1 catalog. */
+const USERS_BROWSE_LIMIT = 800;
+const USERS_SEARCH_LIMIT = 250;
+const USERS_BOARD_LIMIT = 200;
 const RANK_LABELS_FR = {
   guest: 'Invité',
   vip: 'VIP',
@@ -911,7 +910,8 @@ const formatTime = (ts) => {
 /** In-flight GET dedupe (same path+auth) — cuts duplicate status/notify/chat storms */
 const _inflightGet = new Map();
 const DEFAULT_FETCH_TIMEOUT_MS = 20000;
-const MAX_RESPONSE_CHARS = 1_500_000;
+/** Hard cap vs CF HTML bombs — users list is paged so it stays well under this. */
+const MAX_RESPONSE_CHARS = 6_000_000;
 
 async function apiFetch(path, { method = 'GET', token, body, signal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS } = {}) {
   if (!API_URL) {
@@ -1047,29 +1047,44 @@ async function _apiFetchOnce(path, { method = 'GET', token, body, signal, timeou
 
   // Prefer JSON API responses; HTML/CF pages are network failures
   const ct = response.headers?.get?.('content-type') || '';
-  const text = await response.text();
-  if (text && text.length > MAX_RESPONSE_CHARS) {
+  const contentLen = Number(response.headers?.get?.('content-length') || 0);
+  if (contentLen > MAX_RESPONSE_CHARS) {
     const err = new Error('Réponse trop volumineuse');
     err.code = 'NETWORK';
     err.status = response.status;
     throw err;
   }
   let parsed = null;
-  if (text) {
+  let text = '';
+  if (isJsonContentType(ct)) {
     try {
-      parsed = JSON.parse(text);
+      parsed = await response.json();
     } catch {
-      if (
-        !isJsonContentType(ct) ||
-        /cloudflare|error code:\s*10\d{2}/i.test(text) ||
-        response.status >= 400
-      ) {
-        const err = new Error('Accès bloqué (Cloudflare / réseau). Réessayez.');
-        err.code = 'NETWORK';
-        err.status = response.status;
-        throw err;
+      parsed = null;
+    }
+  } else {
+    text = await response.text();
+    if (text && text.length > MAX_RESPONSE_CHARS) {
+      const err = new Error('Réponse trop volumineuse');
+      err.code = 'NETWORK';
+      err.status = response.status;
+      throw err;
+    }
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        if (
+          /cloudflare|error code:\s*10\d{2}/i.test(text) ||
+          response.status >= 400
+        ) {
+          const err = new Error('Accès bloqué (Cloudflare / réseau). Réessayez.');
+          err.code = 'NETWORK';
+          err.status = response.status;
+          throw err;
+        }
+        parsed = text;
       }
-      parsed = text;
     }
   }
 
@@ -1327,6 +1342,16 @@ const NotifyChatBubble = React.memo(
     a.item?.ts === b.item?.ts &&
     a.item?.type === b.item?.type
 );
+
+/** Last activity stamp for a channel row (API has used last_message and last_preview). */
+function channelLastStamp(c) {
+  if (!c) return '';
+  if (c.last_message && c.last_message.ts != null) return c.last_message.ts;
+  if (c.last_ts != null) return c.last_ts;
+  const preview = c.last_preview;
+  if (preview && typeof preview === 'object' && preview.ts != null) return preview.ts;
+  return preview || '';
+}
 
 /** Speaker label: prefer app username (tens), not station role (RADIO4). */
 const chatSpeakerKey = (msg) => {
@@ -2202,7 +2227,7 @@ const UserRow = React.memo(
             <Text style={styles.userLeadPlaceText}>#{place}</Text>
           </View>
         ) : null}
-        <View style={{ flex: 1, minWidth: 0 }}>
+        <View style={styles.userRowBody}>
           <View style={styles.userRowTop}>
             <Text style={styles.userRowName} numberOfLines={1}>
               {item.username}
@@ -2211,7 +2236,7 @@ const UserRow = React.memo(
               style={[styles.userRankPill, { backgroundColor: `${color}22`, borderColor: color }]}
             >
               <Text style={[styles.userRankPillText, { color }]}>
-                {(item.rank || 'guest').toUpperCase()}
+                {rank.toUpperCase()}
               </Text>
             </View>
             {item.banned ? (
@@ -2227,7 +2252,7 @@ const UserRow = React.memo(
               ? ` · ⇄ out ${item.gold_transferred_out ?? 0} / in ${item.gold_transferred_in ?? 0}`
               : ''}
             {' · '}
-            {item.room_time || '0m'}
+            {item.room_time || formatRoomMinutes(item.room_minutes)}
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={18} color="#475569" />
@@ -2414,11 +2439,14 @@ function AppInner() {
   const [usersList, setUsersList] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [usersError, setUsersError] = useState(null);
+  const [usersTotal, setUsersTotal] = useState(0);
   const [usersQuery, setUsersQuery] = useState('');
   const [usersFilter, setUsersFilter] = useState('all');
   const [usersSearchHits, setUsersSearchHits] = useState(null);
   const [usersSearchActiveQuery, setUsersSearchActiveQuery] = useState('');
   const [usersSearching, setUsersSearching] = useState(false);
+  const [usersBoardHits, setUsersBoardHits] = useState(null);
+  const [usersBoardFor, setUsersBoardFor] = useState('');
   const [selectedStationUser, setSelectedStationUser] = useState(null);
   const [userEditRank, setUserEditRank] = useState('guest');
   const [userEditBank, setUserEditBank] = useState('0');
@@ -2485,8 +2513,11 @@ function AppInner() {
   const [manageShowCreate, setManageShowCreate] = useState(true);
   const usersFetchGenRef = useRef(0);
   const usersAbortRef = useRef(null);
+  const usersInflightStationRef = useRef('');
   const usersSearchAbortRef = useRef(null);
   const usersSearchGenRef = useRef(0);
+  const usersBoardAbortRef = useRef(null);
+  const userProfileGenRef = useRef(0);
   const usersLoadedStationRef = useRef('');
   /** Latest Users-tab station (avoid stale closure after rapid R1↔R10 switches). */
   const usersStationRef = useRef('RADIO1');
@@ -2579,6 +2610,15 @@ function AppInner() {
   );
   const notifyInflightRef = useRef(false);
   const chatChannelsInflightRef = useRef(false);
+  const usersFilterRef = useRef('all');
+  const statsStationRef = useRef('RADIO1');
+  const notifyFilterRef = useRef('ALL');
+  const notifyStationRef = useRef('ALL');
+  const connectionOkRef = useRef(true);
+  const typingPingAtRef = useRef(0);
+  const chatTypingFpRef = useRef('');
+  const chatMsgEdgeRef = useRef('');
+  const chatLastReadSentRef = useRef(0);
   const [usersSearchBarKey, setUsersSearchBarKey] = useState(0);
 
   useEffect(() => {
@@ -2592,6 +2632,22 @@ function AppInner() {
   useEffect(() => {
     usersStationRef.current = usersStation;
   }, [usersStation]);
+
+  useEffect(() => {
+    usersFilterRef.current = usersFilter;
+  }, [usersFilter]);
+
+  useEffect(() => {
+    statsStationRef.current = statsStation;
+  }, [statsStation]);
+
+  useEffect(() => {
+    notifyFilterRef.current = notifyFilter;
+  }, [notifyFilter]);
+
+  useEffect(() => {
+    notifyStationRef.current = notifyStation;
+  }, [notifyStation]);
 
   useEffect(() => {
     appPermissionsRef.current = Array.isArray(appPermissions)
@@ -3229,7 +3285,9 @@ function AppInner() {
     statsFetchGenRef.current += 1;
     usersFetchGenRef.current += 1;
     usersSearchGenRef.current += 1;
+    userProfileGenRef.current += 1;
     usersLoadedStationRef.current = '';
+    usersInflightStationRef.current = '';
     try {
       usersAbortRef.current?.abort?.();
     } catch {
@@ -3237,6 +3295,11 @@ function AppInner() {
     }
     try {
       usersSearchAbortRef.current?.abort?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      usersBoardAbortRef.current?.abort?.();
     } catch {
       /* ignore */
     }
@@ -4224,7 +4287,10 @@ function AppInner() {
         netFailCountRef.current = 0;
         authFailStreakRef.current = 0; // real auth works — clear soft 401 streak
         // Always clear offline banner on a real /status success
-        setConnectionOk(true);
+        if (!connectionOkRef.current) {
+          connectionOkRef.current = true;
+          setConnectionOk(true);
+        }
         if ((statusChanged || isManualRefresh) && n > 0) {
           cacheSet('status', '', procArray).catch(() => {});
         }
@@ -4312,6 +4378,7 @@ function AppInner() {
             ) {
               return false;
             }
+            connectionOkRef.current = false;
             setConnectionOk(false);
           }
         }
@@ -4457,30 +4524,35 @@ function AppInner() {
 
         const role = userRoleRef.current || '';
         // Radio logins always use their station filter option + ALL central of what they can see
-        let stationParam = notifyStation;
+        let stationParam = notifyStationRef.current;
         if (role && role !== 'OWNER' && STATION_IDS.includes(role)) {
           // keep ALL (central = everything this role can see) or force own radio
           if (stationParam !== 'ALL' && stationParam !== role) {
             stationParam = role;
           }
         }
+        const filt = notifyFilterRef.current;
         const typeQ =
-          notifyFilter && notifyFilter !== 'ALL'
-            ? `&type=${encodeURIComponent(notifyFilter)}`
+          filt && filt !== 'ALL'
+            ? `&type=${encodeURIComponent(filt)}`
             : '';
         const stQ =
           stationParam && stationParam !== 'ALL'
             ? `&station=${encodeURIComponent(stationParam)}`
             : '';
+        const lim = force || !silent ? 200 : 80;
         const data = await apiFetch(
-          `/notifications?limit=200${typeQ}${stQ}`,
+          `/notifications?limit=${lim}${typeQ}${stQ}`,
           { token, timeoutMs: 12000 }
         );
         if (!mountedRef.current) return false;
         // Any live API success keeps the online pill (not only /status)
         netFailCountRef.current = 0;
         authFailStreakRef.current = 0;
-        setConnectionOk(true);
+        if (!connectionOkRef.current) {
+          connectionOkRef.current = true;
+          setConnectionOk(true);
+        }
         const items = Array.isArray(data?.items) ? data.items : [];
         // O(1) edge fingerprint — avoid O(n) title/body walk every poll
         const fp = fingerprintNotify(items);
@@ -4603,8 +4675,6 @@ function AppInner() {
     [
       handleAuthFailure,
       markNotificationsRead,
-      notifyFilter,
-      notifyStation,
       showBanner,
       presentLocalOsNotification,
     ]
@@ -4702,12 +4772,14 @@ function AppInner() {
       setChatChannels((prev) => {
         if (
           prev.length === channels.length &&
-          prev.every(
-            (c, i) =>
-              c?.id === channels[i]?.id &&
-              c?.unread === channels[i]?.unread &&
-              c?.last_preview === channels[i]?.last_preview
-          )
+          prev.every((c, i) => {
+            const n = channels[i];
+            return (
+              c?.id === n?.id &&
+              c?.unread === n?.unread &&
+              channelLastStamp(c) === channelLastStamp(n)
+            );
+          })
         ) {
           return prev;
         }
@@ -4720,7 +4792,7 @@ function AppInner() {
     } finally {
       chatChannelsInflightRef.current = false;
     }
-  }, [handleLogout]);
+  }, [handleAuthFailure]);
 
   const markChatRead = useCallback(
     async (channelId, ts) => {
@@ -4737,7 +4809,7 @@ function AppInner() {
         if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
       }
     },
-    [fetchChatChannels, handleLogout]
+    [fetchChatChannels, handleAuthFailure]
   );
 
   const fetchChatMessages = useCallback(
@@ -4752,49 +4824,33 @@ function AppInner() {
         );
         if (!mountedRef.current) return;
         const msgs = Array.isArray(data?.messages) ? data.messages : [];
-        // Avoid full list re-render when nothing changed (kills VirtualizedList jank)
-        setChatMessages((prev) => {
-          if (prev.length === msgs.length) {
-            if (prev.length === 0) return prev;
-            let same = true;
-            for (let i = 0; i < prev.length; i++) {
-              const a = prev[i];
-              const b = msgs[i];
-              const aSeen = Array.isArray(a?.seen_by) ? a.seen_by.join(',') : '';
-              const bSeen = Array.isArray(b?.seen_by) ? b.seen_by.join(',') : '';
-              if (
-                a?.id !== b?.id ||
-                a?.text !== b?.text ||
-                a?.edited !== b?.edited ||
-                a?.deleted !== b?.deleted ||
-                a?.image !== b?.image ||
-                !!a?.seen !== !!b?.seen ||
-                aSeen !== bSeen
-              ) {
-                same = false;
-                break;
-              }
-            }
-            if (same) return prev;
-          }
-          return msgs;
-        });
-        if (data?.channel) {
-          setActiveChat((prev) =>
-            prev?.id === channelId
-              ? {
-                  ...prev,
-                  ...data.channel,
-                  peer_read_ts: data.peer_read_ts ?? data.channel.peer_read_ts,
-                  reads: data.reads || data.channel.reads,
-                }
-              : prev || data.channel
-          );
+        const last = msgs[msgs.length - 1];
+        const edge = `${msgs.length}|${msgs[0]?.id || ''}|${last?.id || ''}|${last?.edited ? 1 : 0}|${last?.seen ? 1 : 0}|${Array.isArray(last?.seen_by) ? last.seen_by.length : 0}`;
+        if (edge !== chatMsgEdgeRef.current) {
+          chatMsgEdgeRef.current = edge;
+          setChatMessages(msgs);
         }
-        // Mark read for the channel we just loaded (ref may lag one frame after open)
+        if (data?.channel) {
+          const peerTs = data.peer_read_ts ?? data.channel.peer_read_ts;
+          setActiveChat((prev) => {
+            if (prev?.id !== channelId) return prev || data.channel;
+            if (prev.peer_read_ts === peerTs && prev.reads === (data.reads || data.channel.reads)) {
+              return prev;
+            }
+            return {
+              ...prev,
+              ...data.channel,
+              peer_read_ts: peerTs,
+              reads: data.reads || data.channel.reads,
+            };
+          });
+        }
         if (msgs.length && (!activeChatIdRef.current || activeChatIdRef.current === channelId)) {
-          const lastTs = msgs[msgs.length - 1]?.ts;
-          markChatRead(channelId, lastTs);
+          const lastTs = last?.ts;
+          if (lastTs && lastTs !== chatLastReadSentRef.current) {
+            chatLastReadSentRef.current = lastTs;
+            markChatRead(channelId, lastTs);
+          }
         }
         // Open / refresh while pinned to bottom → show final messages
         if (chatStickToBottomRef.current && activeChatIdRef.current === channelId) {
@@ -4820,6 +4876,9 @@ function AppInner() {
       if (!channel?.id) return;
       // Set ref immediately so mark-read / typing use the right channel
       activeChatIdRef.current = channel.id;
+      chatMsgEdgeRef.current = '';
+      chatLastReadSentRef.current = 0;
+      chatTypingFpRef.current = '';
       chatStickToBottomRef.current = true;
       setActiveChat(channel);
       setChatMessages([]);
@@ -4837,6 +4896,9 @@ function AppInner() {
 
   const closeChatThread = useCallback(() => {
     activeChatIdRef.current = null;
+    chatMsgEdgeRef.current = '';
+    chatLastReadSentRef.current = 0;
+    chatTypingFpRef.current = '';
     setActiveChat(null);
     setChatMessages([]);
     setChatInput('');
@@ -4875,7 +4937,11 @@ function AppInner() {
         { token }
       );
       if (mountedRef.current) {
-        setChatTypingUsers(Array.isArray(data?.typing) ? data.typing : []);
+        const next = Array.isArray(data?.typing) ? data.typing : [];
+        const fp = next.join('\0');
+        if (fp === chatTypingFpRef.current) return;
+        chatTypingFpRef.current = fp;
+        setChatTypingUsers(next);
       }
     } catch {
       /* ignore */
@@ -4885,7 +4951,11 @@ function AppInner() {
   const onChatInputChange = useCallback(
     (text) => {
       setChatInput(text);
-      if (text.trim()) sendTypingPing(true);
+      if (!text.trim()) return;
+      const now = Date.now();
+      if (now - typingPingAtRef.current < 500) return;
+      typingPingAtRef.current = now;
+      sendTypingPing(true);
     },
     [sendTypingPing]
   );
@@ -5267,6 +5337,7 @@ function AppInner() {
     (st) => {
       if (!isOwner) return;
       if (!STATION_IDS.includes(st) || st === statsStation) return;
+      statsStationRef.current = st;
       setStatsStation(st);
       // Instant paint from cache when switching R1…R10
       const peek = cachePeek('stats', st);
@@ -5282,10 +5353,10 @@ function AppInner() {
       const role = userRoleRef.current || '';
       const station =
         role === 'OWNER'
-          ? statsStation
+          ? statsStationRef.current
           : STATION_IDS.includes(role)
             ? role
-            : statsStation;
+            : statsStationRef.current;
       if (!station || !STATION_IDS.includes(station)) return false;
 
       // Silent polls skip if a request is already in flight for any station
@@ -5360,7 +5431,7 @@ function AppInner() {
       }
       return changed;
     },
-    [canStatsTab, statsStation, handleLogout, showBanner]
+    [canStatsTab, handleLogout, showBanner]
   );
 
   const fetchPlaylist = useCallback(
@@ -5572,14 +5643,18 @@ function AppInner() {
       setUsersQuery('');
       setUsersFilter('all');
       setUsersError(null);
+      setUsersBoardHits(null);
+      setUsersBoardFor('');
       setUsersSearchBarKey((k) => k + 1);
       // Instant paint from cache (same pattern as stats station switch)
       const peek = cachePeek('users', next);
       if (cacheUsable(peek) && Array.isArray(peek.data) && peek.data.length) {
         setUsersList(peek.data);
+        setUsersTotal(Number(peek.meta?.total) || peek.data.length);
         usersLoadedStationRef.current = next;
       } else {
         setUsersList([]);
+        setUsersTotal(0);
         usersLoadedStationRef.current = '';
       }
       usersStationRef.current = next;
@@ -5592,6 +5667,7 @@ function AppInner() {
     const rank = (u.rank || 'guest').toLowerCase();
     const st =
       normalizeStationId(u?.station) || normalizeStationId(station) || station || '';
+    const mins = Number(u.room_minutes || 0) || 0;
     return {
       ...u,
       station: st,
@@ -5599,10 +5675,12 @@ function AppInner() {
       rank,
       rank_level:
         typeof u.rank_level === 'number' ? u.rank_level : RANK_LEVELS[rank] ?? 0,
+      room_minutes: mins,
+      room_time: u.room_time || formatRoomMinutes(mins),
     };
   }, []);
 
-  /** Browse catalog (no search) — high limit, active + regulars */
+  /** Browse catalog (filter=all only). Chips filter locally so station switch stays live. */
   const fetchStationUsers = useCallback(
     async ({ silent = true } = {}) => {
       const token = authTokenRef.current;
@@ -5617,13 +5695,24 @@ function AppInner() {
       const station = normalizeStationId(stationRaw);
       if (!station) return;
 
-      try {
-        usersAbortRef.current?.abort?.();
-      } catch {
-        /* ignore */
+      // Same station already loading: keep it. Filter chips / prefetch must not abort.
+      // Pull-to-refresh may replace the in-flight call for this station.
+      if (usersInflightStationRef.current === station && silent) {
+        return;
+      }
+      if (
+        usersInflightStationRef.current &&
+        (usersInflightStationRef.current !== station || !silent)
+      ) {
+        try {
+          usersAbortRef.current?.abort?.();
+        } catch {
+          /* ignore */
+        }
       }
       const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
       usersAbortRef.current = ac;
+      usersInflightStationRef.current = station;
       const gen = ++usersFetchGenRef.current;
 
       // Station changed and no usable cache for target → clear stale rows
@@ -5649,6 +5738,7 @@ function AppInner() {
           gen === usersFetchGenRef.current
         ) {
           setUsersList(cached.data);
+          setUsersTotal(Number(cached.meta?.total) || cached.data.length);
           usersLoadedStationRef.current = station;
         }
       } catch {
@@ -5660,7 +5750,7 @@ function AppInner() {
       try {
         const data = await apiFetch(
           `/users?station=${encodeURIComponent(station)}&filter=all&limit=${USERS_BROWSE_LIMIT}`,
-          { token, signal: ac?.signal, timeoutMs: 45000 }
+          { token, signal: ac?.signal, timeoutMs: 20000 }
         );
         if (!mountedRef.current || gen !== usersFetchGenRef.current) return;
         const returned = normalizeStationId(data?.station) || station;
@@ -5676,6 +5766,7 @@ function AppInner() {
         const list = Array.isArray(data?.users) ? data.users : [];
         const rows = list.map((u) => normalizeUserRow(u, returned));
         setUsersList(rows);
+        setUsersTotal(Number(data?.total) || rows.length);
         usersLoadedStationRef.current = returned;
         setUsersError(null);
         cacheSet('users', returned, rows).catch(() => {});
@@ -5695,12 +5786,11 @@ function AppInner() {
           cacheUsable(peek) && Array.isArray(peek?.data) && peek.data.length > 0;
         if (!hasCache) {
           setUsersError(error.message || 'Chargement impossible.');
-          // Blocking alert only on explicit pull/refresh (silent background soft-fails)
-          if (!silent && appStateRef.current === 'active') {
-            // Inline empty-state retry is preferred; keep alert for hard failures only
-          }
         }
       } finally {
+        if (usersInflightStationRef.current === station) {
+          usersInflightStationRef.current = '';
+        }
         if (mountedRef.current && gen === usersFetchGenRef.current) {
           setUsersLoading(false);
         }
@@ -5745,7 +5835,7 @@ function AppInner() {
       try {
         const data = await apiFetch(
           `/users?station=${encodeURIComponent(station)}&q=${encodeURIComponent(q)}&filter=all&limit=${USERS_SEARCH_LIMIT}`,
-          { token, signal: ac?.signal, timeoutMs: 45000 }
+          { token, signal: ac?.signal, timeoutMs: 20000 }
         );
         if (!mountedRef.current || gen !== usersSearchGenRef.current) return;
         const returned = normalizeStationId(data?.station) || station;
@@ -5769,60 +5859,63 @@ function AppInner() {
     [handleAuthFailure, normalizeUserRow]
   );
 
+  /** Gold / time / bank: separate request so it never cancels the station catalog. */
+  const fetchUsersBoard = useCallback(
+    async (filter) => {
+      const token = authTokenRef.current;
+      const mode = String(filter || '').toLowerCase();
+      if (!token || !USER_LEADERBOARD_FILTERS.has(mode)) return;
+      const role = userRoleRef.current || '';
+      const stationRaw =
+        role === 'OWNER'
+          ? usersStationRef.current
+          : STATION_IDS.includes(role)
+            ? role
+            : usersStationRef.current;
+      const station = normalizeStationId(stationRaw);
+      if (!station) return;
+      try {
+        usersBoardAbortRef.current?.abort?.();
+      } catch {
+        /* ignore */
+      }
+      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      usersBoardAbortRef.current = ac;
+      const want = `${station}:${mode}`;
+      try {
+        const data = await apiFetch(
+          `/users?station=${encodeURIComponent(station)}&filter=${encodeURIComponent(mode)}&limit=${USERS_BOARD_LIMIT}`,
+          { token, signal: ac?.signal, timeoutMs: 20000 }
+        );
+        if (!mountedRef.current) return;
+        const returned = normalizeStationId(data?.station) || station;
+        const expected = normalizeStationId(usersStationRef.current) || station;
+        if (returned !== expected) return;
+        if (String(usersFilterRef.current || '').toLowerCase() !== mode) return;
+        const list = Array.isArray(data?.users) ? data.users : [];
+        setUsersBoardHits(list.map((u) => normalizeUserRow(u, returned)));
+        setUsersBoardFor(want);
+      } catch (error) {
+        if (error?.name === 'AbortError' || error?.code === 'ABORT') return;
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('users_board');
+      }
+    },
+    [handleAuthFailure, normalizeUserRow]
+  );
+
   const filteredUsers = useMemo(() => {
     const q = usersQuery.trim().toLowerCase().replace(/^@/, '');
-    const stationKey = normalizeStationId(effectiveUsersStation) || effectiveUsersStation;
-    const f = (usersFilter || 'all').toLowerCase();
-    const src =
-      q && usersSearchHits && usersSearchActiveQuery === q ? usersSearchHits : usersList;
-    const out = [];
-    for (let i = 0; i < src.length; i += 1) {
-      const u = src[i];
-      if (!q || src !== usersSearchHits) {
-        const us = normalizeStationId(u.station);
-        if (us && us !== stationKey) continue;
-      }
-      if (q && src !== usersSearchHits) {
-        if (!String(u.username || '').toLowerCase().includes(q)) continue;
-      }
-      if (f === 'banned' || f === 'ban') {
-        if (!u.banned) continue;
-      } else if (f === 'ranks' || f === 'ranked' || f === 'staff') {
-        if ((u.rank || 'guest').toLowerCase() === 'guest') continue;
-      } else if (f === 'gold' || f === 'tips' || f === 'tip' || f === 'tiplead') {
-        if (!(Number(u.gold_tipped || 0) > 0)) continue;
-      } else if (f === 'time' || f === 'room' || f === 'room_time' || f === 'minutes') {
-        if (!(Number(u.room_minutes || 0) > 0)) continue;
-      } else if (f === 'bank' || f === 'balance' || f === 'goldbank') {
-        if (!(Number(u.bank || 0) > 0)) continue;
-      } else if (f !== 'all' && f) {
-        if ((u.rank || '').toLowerCase() !== f) continue;
-      }
-      out.push(u);
+    if (q && usersSearchHits && usersSearchActiveQuery === q) return usersSearchHits;
+    const mode = String(usersFilter || 'all').toLowerCase();
+    const st = normalizeStationId(effectiveUsersStation) || '';
+    if (
+      USER_LEADERBOARD_FILTERS.has(mode) &&
+      Array.isArray(usersBoardHits) &&
+      usersBoardFor === `${st}:${mode}`
+    ) {
+      return usersBoardHits;
     }
-    if (f === 'gold' || f === 'tips' || f === 'tip' || f === 'tiplead') {
-      out.sort(
-        (a, b) =>
-          Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
-          Number(b.bank || 0) - Number(a.bank || 0) ||
-          String(a.username || '').localeCompare(String(b.username || ''))
-      );
-    } else if (f === 'time' || f === 'room' || f === 'room_time' || f === 'minutes') {
-      out.sort(
-        (a, b) =>
-          Number(b.room_minutes || 0) - Number(a.room_minutes || 0) ||
-          Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
-          String(a.username || '').localeCompare(String(b.username || ''))
-      );
-    } else if (f === 'bank' || f === 'balance' || f === 'goldbank') {
-      out.sort(
-        (a, b) =>
-          Number(b.bank || 0) - Number(a.bank || 0) ||
-          Number(b.gold_tipped || 0) - Number(a.gold_tipped || 0) ||
-          String(a.username || '').localeCompare(String(b.username || ''))
-      );
-    }
-    return out;
+    return applyUsersListFilter(usersList, mode);
   }, [
     usersList,
     usersQuery,
@@ -5830,6 +5923,8 @@ function AppInner() {
     effectiveUsersStation,
     usersSearchHits,
     usersSearchActiveQuery,
+    usersBoardHits,
+    usersBoardFor,
   ]);
 
   const openStationUser = useCallback(
@@ -5844,21 +5939,42 @@ function AppInner() {
         return;
       }
       const rank = (u.rank || 'guest').toLowerCase();
+      const username = u.username;
       setSelectedStationUser({
         ...u,
         station,
-        id: u.id || `${station}:${u.username}`,
+        id: u.id || `${station}:${username}`,
         rank,
       });
       setUserEditRank(rank);
       setUserEditBank(String(u.bank ?? 0));
       setUserEditBanned(!!u.banned);
+      // List rows are lean — pull xfer / credit / skips for the sheet only
+      const token = authTokenRef.current;
+      if (!token || !username) return;
+      const gen = ++userProfileGenRef.current;
+      apiFetch(
+        `/users/profile?station=${encodeURIComponent(station)}&user=${encodeURIComponent(username)}`,
+        { token, timeoutMs: 12000 }
+      )
+        .then((data) => {
+          if (!mountedRef.current || gen !== userProfileGenRef.current) return;
+          if (!data || data.error) return;
+          const returned = normalizeStationId(data.station) || station;
+          if (returned !== station) return;
+          setSelectedStationUser((prev) => {
+            if (!prev || prev.username !== username) return prev;
+            return normalizeUserRow({ ...prev, ...data }, returned);
+          });
+        })
+        .catch(() => {});
     },
-    [effectiveUsersStation]
+    [effectiveUsersStation, normalizeUserRow]
   );
 
   const closeStationUser = useCallback(() => {
     if (userEditSaving) return;
+    userProfileGenRef.current += 1;
     setSelectedStationUser(null);
   }, [userEditSaving]);
 
@@ -7038,7 +7154,7 @@ function AppInner() {
   }, [scrollChatToEnd]);
 
   const onRadiosTab = mainTab === 'radios';
-  const onAlertsTab = mainTab === 'alerts' || notifyFeedVisible;
+  const onAlertsTab = mainTab === 'alerts';
   const onChatTab = mainTab === 'chat';
 
   const listenAllowedStations = useMemo(() => {
@@ -7467,16 +7583,7 @@ function AppInner() {
   // —— Smart adaptive status poll (snappy when processes change, calm when quiet)
   useEffect(() => {
     if (!isUnlocked) return undefined;
-    const budget = statusBudgetRef.current;
-    budget.boost();
-    // Active Radios tab → lower max; elsewhere allow slower
-    const minMs = onRadiosTab ? POLL_STATUS_MS : POLL_STATUS_IDLE_MS;
-    const maxMs = onRadiosTab ? POLL_STATUS_IDLE_MS : POLL_STATUS_MAX_MS;
-    statusBudgetRef.current = createAdaptiveBudget({
-      minMs,
-      maxMs,
-      quietBeforeSlow: 2,
-    });
+    statusBudgetRef.current.boost();
     return startSmartLoop(
       async () => {
         const changed = await fetchStatus(false);
@@ -7489,23 +7596,19 @@ function AppInner() {
         immediate: true,
       }
     );
-  }, [isUnlocked, fetchStatus, onRadiosTab]);
+  }, [isUnlocked, fetchStatus]);
+
+  useEffect(() => {
+    if (!isUnlocked) return;
+    statusBudgetRef.current.setRange?.(
+      onRadiosTab ? POLL_STATUS_MS : POLL_STATUS_IDLE_MS,
+      onRadiosTab ? POLL_STATUS_IDLE_MS : POLL_STATUS_MAX_MS
+    );
+  }, [isUnlocked, onRadiosTab]);
 
   // —— Smart streams (now playing + listeners): fast while listening, calms when title stable
   useEffect(() => {
     if (!isUnlocked) return undefined;
-    const minMs = listenPlaying
-      ? POLL_STREAMS_FAST_MS
-      : onRadiosTab
-        ? POLL_STREAMS_IDLE_MS
-        : 20000;
-    const maxMs = listenPlaying ? 12000 : POLL_STREAMS_MAX_MS;
-    streamsBudgetRef.current = createAdaptiveBudget({
-      minMs,
-      maxMs,
-      quietBeforeSlow: 2,
-      stepUp: 1.5,
-    });
     streamsBudgetRef.current.boost();
     return startSmartLoop(
       async () => {
@@ -7519,7 +7622,18 @@ function AppInner() {
         immediate: true,
       }
     );
-  }, [isUnlocked, fetchStreams, onRadiosTab, listenPlaying]);
+  }, [isUnlocked, fetchStreams]);
+
+  useEffect(() => {
+    if (!isUnlocked) return;
+    const minMs = listenPlaying
+      ? POLL_STREAMS_FAST_MS
+      : onRadiosTab
+        ? POLL_STREAMS_IDLE_MS
+        : 20000;
+    const maxMs = listenPlaying ? 12000 : POLL_STREAMS_MAX_MS;
+    streamsBudgetRef.current.setRange?.(minMs, maxMs);
+  }, [isUnlocked, onRadiosTab, listenPlaying]);
 
   useEffect(() => {
     if (!isUnlocked || !isOwner) return undefined;
@@ -7534,13 +7648,6 @@ function AppInner() {
   // —— Smart notifications: faster on Alerts tab / when new items appear
   useEffect(() => {
     if (!isUnlocked) return undefined;
-    const minMs = onAlertsTab ? POLL_NOTIFY_MS : POLL_NOTIFY_IDLE_MS;
-    const maxMs = onAlertsTab ? 16000 : POLL_NOTIFY_MAX_MS;
-    notifyBudgetRef.current = createAdaptiveBudget({
-      minMs,
-      maxMs,
-      quietBeforeSlow: 3,
-    });
     notifyBudgetRef.current.boost();
     return startSmartLoop(
       async () => {
@@ -7554,32 +7661,51 @@ function AppInner() {
         immediate: true,
       }
     );
-  }, [isUnlocked, fetchNotifications, onAlertsTab]);
+  }, [isUnlocked, fetchNotifications]);
+
+  useEffect(() => {
+    if (!isUnlocked) return;
+    notifyBudgetRef.current.setRange?.(
+      onAlertsTab ? POLL_NOTIFY_MS : POLL_NOTIFY_IDLE_MS,
+      onAlertsTab ? 16000 : POLL_NOTIFY_MAX_MS
+    );
+  }, [isUnlocked, onAlertsTab]);
 
   // Chat channel list — adaptive (badge-only when not on chat tab)
-  useEffect(() => {
-    if (!isUnlocked) return undefined;
-    if (onChatTab) fetchChatChannels();
-    const budget = createAdaptiveBudget({
-      minMs: onChatTab ? POLL_CHAT_LIST_MS : POLL_CHAT_LIST_IDLE_MS,
-      maxMs: onChatTab ? 18000 : 40000,
+  const chatListBudgetRef = useRef(
+    createAdaptiveBudget({
+      minMs: POLL_CHAT_LIST_IDLE_MS,
+      maxMs: 40000,
       quietBeforeSlow: 3,
       stepUp: 1.5,
       bgFloorMs: 30000,
-    });
+    })
+  );
+
+  useEffect(() => {
+    if (!isUnlocked) return undefined;
     return startSmartLoop(
       async () => {
         await fetchChatChannels();
-        return false; // list equality handled inside; don't thrash delay
+        return false;
       },
       {
-        budget,
+        budget: chatListBudgetRef.current,
         enabled: () => !!authTokenRef.current && mountedRef.current,
         getAppState: () => appStateRef.current,
         immediate: false,
       }
     );
-  }, [isUnlocked, fetchChatChannels, onChatTab]);
+  }, [isUnlocked, fetchChatChannels]);
+
+  useEffect(() => {
+    if (!isUnlocked) return;
+    chatListBudgetRef.current.setRange?.(
+      onChatTab ? POLL_CHAT_LIST_MS : POLL_CHAT_LIST_IDLE_MS,
+      onChatTab ? 18000 : 40000
+    );
+    if (onChatTab) fetchChatChannels();
+  }, [isUnlocked, onChatTab, fetchChatChannels]);
 
   // Active chat messages + typing — adaptive smart loop
   useEffect(() => {
@@ -7730,17 +7856,28 @@ function AppInner() {
     }
   }, [mainTab, activeChat, fetchNotifications, fetchChatChannels]);
 
-  // Users tab: Highrise directory (RADIO1 default is hit hardest — always revalidate)
+  // Users tab: one catalog fetch per station. Filter chips stay client-side.
   useEffect(() => {
     if (mainTab !== 'users') return undefined;
     const st = normalizeStationId(usersStation) || usersStation;
     const already =
       usersLoadedStationRef.current === st && usersList.length > 0;
-    // silent when we already painted (cache / prior fetch); network still refreshes
     fetchStationUsers({ silent: already });
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainTab, usersStation, fetchStationUsers]);
+
+  // Leaderboards only — never abort the station catalog fetch.
+  useEffect(() => {
+    if (mainTab !== 'users') return undefined;
+    if (!USER_LEADERBOARD_FILTERS.has(String(usersFilter || '').toLowerCase())) {
+      setUsersBoardHits(null);
+      setUsersBoardFor('');
+      return undefined;
+    }
+    fetchUsersBoard(usersFilter);
+    return undefined;
+  }, [mainTab, usersStation, usersFilter, fetchUsersBoard]);
 
   // Management tab: app logins for all managers; BM CMD list only for big OWNER
   useEffect(() => {
@@ -8197,14 +8334,8 @@ function AppInner() {
   // Stats tab: smart adaptive refresh while visible
   useEffect(() => {
     if (!isUnlocked || mainTab !== 'stats' || !canStatsTab) return undefined;
-    statsBudgetRef.current = createAdaptiveBudget({
-      minMs: POLL_STATS_MS,
-      maxMs: POLL_STATS_MAX_MS,
-      quietBeforeSlow: 2,
-    });
     statsBudgetRef.current.boost();
-    statsFpRef.current = '';
-    fetchStationStats({ silent: false, force: true });
+    fetchStationStats({ silent: true });
     return startSmartLoop(
       async () => {
         const changed = await fetchStationStats({ silent: true });
@@ -8217,7 +8348,7 @@ function AppInner() {
         immediate: false,
       }
     );
-  }, [isUnlocked, mainTab, canStatsTab, effectiveStatsStation, fetchStationStats]);
+  }, [isUnlocked, mainTab, canStatsTab, fetchStationStats]);
 
   // Intelligent prefetch: warm the next likely tab from cache/network when idle
   useEffect(() => {
@@ -8232,10 +8363,13 @@ function AppInner() {
       } else if (mainTab === 'stats' && canStatsTab) {
         fetchStatus(false);
       } else if (mainTab === 'users' && canUsersTab) {
-        // Soft fill only if we never successfully loaded this station (avoid abort races)
+        // Soft fill only if this station is not loaded and not already in flight
         try {
           const st = effectiveUsersStation;
-          if (usersLoadedStationRef.current !== st) {
+          if (
+            usersLoadedStationRef.current !== st &&
+            usersInflightStationRef.current !== st
+          ) {
             const peek = cachePeek('users', st);
             if (!cacheUsable(peek)) {
               fetchStationUsers({ silent: true });
@@ -10777,10 +10911,10 @@ function AppInner() {
                   ? t('users.loading')
                   : usersSearching
                     ? `${t('users.searching')} ${filteredUsers.length} ${t('users.results')}`
-                    : usersQuery.trim()
+                    : usersQuery.trim() || usersFilter !== 'all'
                       ? `${filteredUsers.length} ${t('users.results')}`
-                      : usersFilter !== 'all'
-                        ? `${filteredUsers.length} / ${usersList.length} ${t('users.count')}`
+                      : usersTotal > usersList.length
+                        ? `${usersList.length} / ${usersTotal} ${t('users.count')}`
                         : `${usersList.length} ${t('users.count')}`}
               </Text>
               {usersLoading && usersList.length > 0 ? (
@@ -11212,10 +11346,11 @@ function AppInner() {
         ) : null}
 
         {/* ===== OWNER COMMAND CENTER ===== */}
+        {cmdCenterVisible && isOwner ? (
         <Modal
           animationType="slide"
           transparent
-          visible={cmdCenterVisible && isOwner}
+          visible
           onRequestClose={() => setCmdCenterVisible(false)}
           statusBarTranslucent={IS_ANDROID}
           presentationStyle={IS_IOS ? 'overFullScreen' : undefined}
@@ -11833,12 +11968,14 @@ function AppInner() {
             </View>
           </KeyboardAvoidingView>
         </Modal>
+        ) : null}
 
         {/* ===== NOTIFICATION CHAT (Discord-style feed) ===== */}
+        {notifyFeedVisible ? (
         <Modal
           animationType="slide"
           transparent
-          visible={notifyFeedVisible}
+          visible
           onRequestClose={() => setNotifyFeedVisible(false)}
           statusBarTranslucent={IS_ANDROID}
           presentationStyle={IS_IOS ? 'overFullScreen' : undefined}
@@ -11974,6 +12111,7 @@ function AppInner() {
             </View>
           </KeyboardAvoidingView>
         </Modal>
+        ) : null}
 
         {/* ===== TERMINAL ===== */}
         <Modal
@@ -14447,6 +14585,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     gap: 8,
   },
+  userRowBody: { flex: 1, minWidth: 0 },
   userRowBanned: {
     borderColor: 'rgba(248,113,113,0.45)',
     backgroundColor: 'rgba(127,29,29,0.25)',

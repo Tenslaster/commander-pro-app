@@ -102,4 +102,4 @@ jobs:
           name: CommanderPro-apk
           path: CommanderPro.apk
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 5

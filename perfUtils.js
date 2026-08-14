@@ -93,6 +93,78 @@ export function cheapCacheFp(kind, data, meta) {
   return `${kind}|${String(data).slice(0, 48)}`;
 }
 
+/** `{n}m` / `{h}h {r}m` — arithmetic beats a Map cache on this size. */
+export function formatRoomMinutes(mins) {
+  const m = Math.max(0, Math.floor(Number(mins) || 0));
+  if (m < 60) return `${m}m`;
+  const h = (m / 60) | 0;
+  const r = m % 60;
+  if (h < 24) return r ? `${h}h ${r}m` : `${h}h`;
+  const d = (h / 24) | 0;
+  const rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
+}
+
+const _EXACT_RANK = new Set(['vip', 'mod', 'admin', 'owner', 'dev']);
+const _GOLD_MODES = new Set(['gold', 'tips', 'tiplead', 'tip']);
+const _TIME_MODES = new Set(['time', 'room', 'room_time', 'minutes']);
+const _BANK_MODES = new Set(['bank', 'balance', 'goldbank']);
+const _STAFF_MODES = new Set(['ranks', 'ranked', 'staff']);
+const _BAN_MODES = new Set(['banned', 'ban']);
+
+function _nameCmp(a, b) {
+  return String(a.username || '').localeCompare(String(b.username || ''));
+}
+
+/** Chip filters on an already-loaded station catalog (no extra network). */
+export function applyUsersListFilter(list, filter) {
+  const mode = String(filter || 'all').toLowerCase();
+  if (!Array.isArray(list) || !list.length || mode === 'all') return list;
+  if (_STAFF_MODES.has(mode)) {
+    return list.filter((u) => (u.rank || 'guest') !== 'guest');
+  }
+  if (_BAN_MODES.has(mode)) {
+    return list.filter((u) => !!u.banned);
+  }
+  if (_EXACT_RANK.has(mode)) {
+    return list.filter((u) => (u.rank || '') === mode);
+  }
+  if (_GOLD_MODES.has(mode)) {
+    return list
+      .filter((u) => (u.gold_tipped | 0) > 0)
+      .slice()
+      .sort(
+        (a, b) =>
+          (b.gold_tipped | 0) - (a.gold_tipped | 0) ||
+          (b.bank | 0) - (a.bank | 0) ||
+          _nameCmp(a, b)
+      );
+  }
+  if (_TIME_MODES.has(mode)) {
+    return list
+      .filter((u) => (u.room_minutes | 0) > 0)
+      .slice()
+      .sort(
+        (a, b) =>
+          (b.room_minutes | 0) - (a.room_minutes | 0) ||
+          (b.gold_tipped | 0) - (a.gold_tipped | 0) ||
+          _nameCmp(a, b)
+      );
+  }
+  if (_BANK_MODES.has(mode)) {
+    return list
+      .filter((u) => (u.bank | 0) > 0)
+      .slice()
+      .sort(
+        (a, b) =>
+          (b.bank | 0) - (a.bank | 0) ||
+          (b.gold_tipped | 0) - (a.gold_tipped | 0) ||
+          _nameCmp(a, b)
+      );
+  }
+  return list;
+}
+
 export function fingerprintStats(payload) {
   if (!payload || typeof payload !== 'object') return '0';
   const s = payload.stats && typeof payload.stats === 'object' ? payload.stats : payload;

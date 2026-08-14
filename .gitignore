@@ -69,6 +69,7 @@ scripts/*fcm*
 scripts/smoke*
 scripts/upload_*
 scripts/README.md
+scripts/*-results.json
 assets/_gen_icons.py
 # Built artifacts never belong in git
 *.apk

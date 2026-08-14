@@ -316,7 +316,7 @@ jobs:
         with:
           name: ipa
           path: build/*.ipa
-          retention-days: 14
+          retention-days: 5
           if-no-files-found: error
 
       - name: Save DerivedData cache

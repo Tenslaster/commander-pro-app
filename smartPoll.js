@@ -41,13 +41,20 @@ export function createAdaptiveBudget({
   inactiveFloorMs = 6000,
 } = {}) {
   let current = Math.max(1000, minMs | 0);
-  const lo = Math.max(1000, minMs | 0);
-  const hi = Math.max(lo, maxMs | 0);
+  let lo = Math.max(1000, minMs | 0);
+  let hi = Math.max(lo, maxMs | 0);
   let quietHits = 0;
-  const bgFloor = Math.max(hi, bgFloorMs | 0);
-  const inactiveFloor = Math.max(lo, inactiveFloorMs | 0);
+  let bgFloor = Math.max(hi, bgFloorMs | 0);
+  let inactiveFloor = Math.max(lo, inactiveFloorMs | 0);
 
   return {
+    /** Change min/max without tearing down the smart loop. */
+    setRange(nextMin, nextMax) {
+      lo = Math.max(1000, nextMin | 0);
+      hi = Math.max(lo, nextMax | 0);
+      current = Math.min(hi, Math.max(lo, current));
+      return current;
+    },
     /** Call after each poll. `changed` = data actually differed. Returns next delay ms. */
     next(changed) {
       if (changed) {

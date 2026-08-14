@@ -8,7 +8,7 @@ export const DEFAULT_API_URL = `${PUBLIC_ORIGIN}/api`;
 export const DEFAULT_DOWNLOAD_URL = `${PUBLIC_ORIGIN}/downloads`;
 
 /** Must match app.json expo.version — hardcoded so JS-repack cannot inherit a stale native value. */
-export const APP_VERSION = '1.5.9';
+export const APP_VERSION = '1.5.10';
 
 export const OLD_PUBLIC_HOSTS = ['crew.kingdom.forum'];
 
