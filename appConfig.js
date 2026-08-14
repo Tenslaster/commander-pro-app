@@ -18,8 +18,12 @@ const HTTP_RE = /^http:\/\//i;
 const PORT8000_RE = /:8000(?=\/|$)/;
 const TRAIL_SLASH_RE = /\/+$/;
 const WS_RE = /\s+/g;
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 const OLD_HOST_RES = OLD_PUBLIC_HOSTS.map(
-  (h) => new RegExp(`https?://(?:www\\.)?${h.replace(/\./g, '\\.')}`, 'i')
+  (h) => new RegExp(`https?://(?:www\\.)?${escapeRegex(h)}`, 'i')
 );
 
 /** Rewrite leftover old-host / cleartext Icecast URLs onto the current origin. */
