@@ -2485,6 +2485,7 @@ function AppInner() {
   const [statsPeriod, setStatsPeriod] = useState('day'); // day | week | month
   const [statsPayload, setStatsPayload] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState(null);
   const statsInflightRef = useRef(false);
   const statsFetchGenRef = useRef(0);
 
@@ -3303,9 +3304,12 @@ function AppInner() {
     setPlaylistLoading(false);
     setStatsPayload(null);
     setStatsLoading(false);
+    setStatsError(null);
     setStatsPeriod('day');
     setStatsStation('RADIO1');
     statsFetchGenRef.current += 1;
+    statsInflightRef.current = false;
+    statsFpRef.current = '';
     usersFetchGenRef.current += 1;
     usersSearchGenRef.current += 1;
     userProfileGenRef.current += 1;
@@ -5365,13 +5369,27 @@ function AppInner() {
 
   const switchStatsStation = useCallback(
     (st) => {
+      // Real OWNER only — radio logins stay locked to their station.
       if (!isOwner) return;
       if (!STATION_IDS.includes(st) || st === statsStation) return;
+      // Drop in-flight RADIO* responses so they cannot paint over the new station.
+      statsFetchGenRef.current += 1;
+      statsInflightRef.current = false;
+      statsFpRef.current = '';
       statsStationRef.current = st;
-      setStatsStation(st);
-      // Instant paint from cache when switching R1…R10
       const peek = cachePeek('stats', st);
-      if (cacheUsable(peek) && peek.data) setStatsPayload(peek.data);
+      const cached = cacheUsable(peek) ? peek.data : null;
+      const cachedSt = cached && typeof cached === 'object' ? cached.station : null;
+      if (cached && cached.stats && (!cachedSt || cachedSt === st)) {
+        setStatsPayload(cached);
+        setStatsError(null);
+        setStatsLoading(false);
+      } else {
+        setStatsPayload(null);
+        setStatsError(null);
+        setStatsLoading(true);
+      }
+      setStatsStation(st);
     },
     [isOwner, statsStation]
   );
@@ -5381,6 +5399,8 @@ function AppInner() {
       const token = authTokenRef.current;
       if (!token || !canStatsTab) return false;
       const role = userRoleRef.current || '';
+      // OWNER picks a station; RADIO# staff are locked to their radio.
+      // NONE / unknown roles still send the selected station (API will 403 if not allowed).
       const station =
         role === 'OWNER'
           ? statsStationRef.current
@@ -5416,52 +5436,69 @@ function AppInner() {
             mountedRef.current
           ) {
             const cachedSt = cached.data?.station;
-            if (!cachedSt || cachedSt === station) {
+            if (cached.data.stats && (!cachedSt || cachedSt === station)) {
               setStatsPayload(cached.data);
+              setStatsError(null);
             }
           }
         } catch {
           /* ignore */
         }
       }
-      if (!silent && mountedRef.current && gen === statsFetchGenRef.current) {
+      if ((!silent || force) && mountedRef.current && gen === statsFetchGenRef.current) {
         setStatsLoading(true);
       }
       try {
         const data = await apiFetch(
           `/station_stats?station=${encodeURIComponent(station)}`,
-          { token, timeoutMs: 15000 }
+          { token, timeoutMs: 20000 }
         );
         // Drop late responses after station switch / logout
         if (!mountedRef.current || gen !== statsFetchGenRef.current) return false;
         const payload = data && typeof data === 'object' ? data : null;
-        if (payload && payload.station && payload.station !== station) return false;
+        if (!payload || (payload.station && payload.station !== station)) return false;
+        if (!payload.stats || typeof payload.stats !== 'object') {
+          if (mountedRef.current && gen === statsFetchGenRef.current) {
+            setStatsError(payload.error || 'Stats failed');
+          }
+          return false;
+        }
         // Smart: only setState if numbers actually moved
         const fp = fingerprintStats(payload);
         changed = force || fp !== statsFpRef.current;
         if (changed) {
           statsFpRef.current = fp;
           setStatsPayload(payload);
-          if (payload) cacheSet('stats', station, payload).catch(() => {});
+          setStatsError(null);
+          cacheSet('stats', station, payload).catch(() => {});
+        } else {
+          setStatsError(null);
         }
       } catch (error) {
         if (!mountedRef.current || gen !== statsFetchGenRef.current) return false;
         if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
-        else if (!silent) {
+        else {
           const peek = cachePeek('stats', station);
-          if (!cacheUsable(peek) || force) {
+          const haveCache =
+            cacheUsable(peek) &&
+            peek.data?.stats &&
+            (!peek.data?.station || peek.data.station === station);
+          if (!haveCache || force) {
+            setStatsError(error.message || 'Stats failed');
+          }
+          if (!silent && (!haveCache || force)) {
             showBanner(error.message || 'Stats failed', 'warn');
           }
         }
       } finally {
         if (gen === statsFetchGenRef.current) {
           statsInflightRef.current = false;
-          if (mountedRef.current && !silent) setStatsLoading(false);
+          if (mountedRef.current) setStatsLoading(false);
         }
       }
       return changed;
     },
-    [canStatsTab, handleLogout, showBanner]
+    [canStatsTab, handleAuthFailure, showBanner]
   );
 
   const fetchPlaylist = useCallback(
@@ -8368,7 +8405,8 @@ function AppInner() {
     canSecurityTab,
   ]);
 
-  // Stats tab: smart adaptive refresh while visible
+  // Stats tab: smart adaptive refresh while visible.
+  // Include statsStation so OWNER radio chips actually refetch (users tab does this).
   useEffect(() => {
     if (!isUnlocked || mainTab !== 'stats' || !canStatsTab) return undefined;
     statsBudgetRef.current.boost();
@@ -8385,7 +8423,7 @@ function AppInner() {
         immediate: false,
       }
     );
-  }, [isUnlocked, mainTab, canStatsTab, fetchStationStats]);
+  }, [isUnlocked, mainTab, canStatsTab, statsStation, fetchStationStats]);
 
   // Intelligent prefetch: warm the next likely tab from cache/network when idle
   useEffect(() => {
@@ -9292,15 +9330,57 @@ function AppInner() {
                   </ScrollView>
                 </View>
 
-                {statsLoading && !statsPayload ? (
-                  <ActivityIndicator color="#22d3ee" style={{ marginTop: 24 }} />
-                ) : null}
-
                 {(() => {
-                  const s = statsPayload?.stats?.[statsPeriod] || {};
-                  const life = statsPayload?.stats?.lifetime || {};
-                  const boards = statsPayload?.stats?.leaderboards || {};
-                  const ranks = statsPayload?.stats?.ranks || {};
+                  const payloadStation = statsPayload?.station;
+                  const statsObj =
+                    statsPayload &&
+                    typeof statsPayload === 'object' &&
+                    statsPayload.stats &&
+                    typeof statsPayload.stats === 'object'
+                      ? statsPayload.stats
+                      : null;
+                  const payloadOk = !!(
+                    statsObj &&
+                    (!payloadStation || payloadStation === effectiveStatsStation)
+                  );
+                  if (statsLoading && !payloadOk) {
+                    return (
+                      <ActivityIndicator color="#22d3ee" style={{ marginTop: 24 }} />
+                    );
+                  }
+                  if (!payloadOk) {
+                    return (
+                      <View style={[styles.emptyWrap, { paddingTop: 28 }]}>
+                        <Ionicons
+                          name="stats-chart-outline"
+                          size={36}
+                          color="#475569"
+                        />
+                        <Text style={styles.emptyText}>
+                          {statsError || t('stats.empty')}
+                        </Text>
+                        <TouchableOpacity
+                          style={[styles.loginBtn, { marginTop: 14 }]}
+                          onPress={() =>
+                            fetchStationStats({ silent: false, force: true })
+                          }
+                        >
+                          <Text style={styles.loginBtnText}>{t('stats.retry')}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  }
+                  try {
+                  const s = statsObj?.[statsPeriod] || {};
+                  const life = statsObj?.lifetime || {};
+                  const boards =
+                    statsObj?.leaderboards && typeof statsObj.leaderboards === 'object'
+                      ? statsObj.leaderboards
+                      : {};
+                  const ranks =
+                    statsObj?.ranks && typeof statsObj.ranks === 'object' && !Array.isArray(statsObj.ranks)
+                      ? statsObj.ranks
+                      : {};
                   const fmt = (n) => {
                     const v = Number(n) || 0;
                     try {
@@ -9430,16 +9510,17 @@ function AppInner() {
                       : statsPeriod === 'week'
                         ? 'week'
                         : null;
-                  const series = seriesKey
-                    ? statsPayload?.stats?.series?.[seriesKey] || []
-                    : [];
+                  const seriesRaw = seriesKey
+                    ? statsObj?.series?.[seriesKey]
+                    : null;
+                  const series = Array.isArray(seriesRaw) ? seriesRaw : [];
                   const seriesMax = Math.max(
                     1,
                     ...series.map((d) =>
                       Math.max(
-                        Number(d.tips_gold) || 0,
-                        Number(d.songs) || 0,
-                        Number(d.visitors) || 0
+                        Number(d?.tips_gold) || 0,
+                        Number(d?.songs) || 0,
+                        Number(d?.visitors) || 0
                       )
                     )
                   );
@@ -9453,27 +9534,28 @@ function AppInner() {
                     const rh = h % 24;
                     return rh ? `${d}d ${rh}h` : `${d}d`;
                   };
+                  const asRows = (v) => (Array.isArray(v) ? v : []);
                   const boardBlocks = [
                     {
                       key: 'tippers',
                       title: t('stats.top.tippers'),
                       unit: t('stats.unit.gold'),
                       color: '#fbbf24',
-                      rows: boards.tippers || [],
+                      rows: asRows(boards.tippers),
                     },
                     {
                       key: 'song_requesters',
                       title: t('stats.top.requesters'),
                       unit: t('stats.unit.songs'),
                       color: '#a78bfa',
-                      rows: boards.song_requesters || [],
+                      rows: asRows(boards.song_requesters),
                     },
                     {
                       key: 'room_time',
                       title: t('stats.top.roomTime'),
                       unit: '',
                       color: '#34d399',
-                      rows: boards.room_time || [],
+                      rows: asRows(boards.room_time),
                       formatValue: fmtMinutesHuman,
                     },
                     {
@@ -9481,28 +9563,28 @@ function AppInner() {
                       title: t('stats.top.skippers'),
                       unit: t('stats.unit.skips'),
                       color: '#f87171',
-                      rows: boards.skippers || [],
+                      rows: asRows(boards.skippers),
                     },
                     {
                       key: 'bank',
                       title: t('stats.top.bank'),
                       unit: t('stats.unit.gold'),
                       color: '#38bdf8',
-                      rows: boards.bank || [],
+                      rows: asRows(boards.bank),
                     },
                     {
                       key: 'transfer_out',
                       title: t('stats.top.transferOut'),
                       unit: t('stats.unit.gold'),
                       color: '#22d3ee',
-                      rows: boards.transfer_out || [],
+                      rows: asRows(boards.transfer_out),
                     },
                     {
                       key: 'transfer_in',
                       title: t('stats.top.transferIn'),
                       unit: t('stats.unit.gold'),
                       color: '#67e8f9',
-                      rows: boards.transfer_in || [],
+                      rows: asRows(boards.transfer_in),
                     },
                   ];
                   const rankEntries = Object.entries(ranks || {});
@@ -9576,26 +9658,26 @@ function AppInner() {
                               </Text>
                             </View>
                             <View style={styles.statsTrendBars}>
-                              {series.map((d) => {
+                              {series.map((d, di) => {
                                 const th = Math.max(
                                   4,
                                   Math.round(
-                                    ((Number(d.tips_gold) || 0) / seriesMax) * 56
+                                    ((Number(d?.tips_gold) || 0) / seriesMax) * 56
                                   )
                                 );
                                 const sh = Math.max(
                                   4,
-                                  Math.round(((Number(d.songs) || 0) / seriesMax) * 56)
+                                  Math.round(((Number(d?.songs) || 0) / seriesMax) * 56)
                                 );
                                 const vh = Math.max(
                                   4,
                                   Math.round(
-                                    ((Number(d.visitors) || 0) / seriesMax) * 56
+                                    ((Number(d?.visitors) || 0) / seriesMax) * 56
                                   )
                                 );
-                                const dayLabel = String(d.date || '').slice(8, 10);
+                                const dayLabel = String(d?.date || '').slice(8, 10);
                                 return (
-                                  <View key={d.date} style={styles.statsTrendCol}>
+                                  <View key={d?.date || `d-${di}`} style={styles.statsTrendCol}>
                                     <View style={styles.statsTrendColBars}>
                                       <View
                                         style={[
@@ -9728,10 +9810,10 @@ function AppInner() {
                           <Ionicons name="information-circle" size={18} color="#94a3b8" />
                           <Text style={styles.statsLifeLabel}>{t('stats.asOf')}</Text>
                           <Text style={[styles.statsLifeValue, { color: '#94a3b8', fontSize: 13 }]}>
-                            {statsPayload?.stats?.as_of || '—'}
+                            {statsObj?.as_of || '—'}
                           </Text>
                           <Text style={styles.statsLifeUnit}>
-                            {statsPayload?.stats?.data_source
+                            {statsObj?.data_source
                               ? 'SQL'
                               : ''}
                           </Text>
@@ -9782,16 +9864,31 @@ function AppInner() {
                           </View>
                         ) : null
                       )}
-                      {statsPayload?.stats?.tracked_days != null ? (
+                      {statsObj?.tracked_days != null ? (
                         <Text style={styles.statsFootNote}>
-                          {t('stats.trackedDays')}: {fmt(statsPayload.stats.tracked_days)}
-                          {statsPayload.stats.as_of
-                            ? ` · ${t('stats.asOf')} ${statsPayload.stats.as_of}`
+                          {t('stats.trackedDays')}: {fmt(statsObj.tracked_days)}
+                          {statsObj.as_of
+                            ? ` · ${t('stats.asOf')} ${statsObj.as_of}`
                             : ''}
                         </Text>
                       ) : null}
                     </>
                   );
+                  } catch {
+                    return (
+                      <View style={[styles.emptyWrap, { paddingTop: 28 }]}>
+                        <Text style={styles.emptyText}>{t('stats.loadError')}</Text>
+                        <TouchableOpacity
+                          style={[styles.loginBtn, { marginTop: 14 }]}
+                          onPress={() =>
+                            fetchStationStats({ silent: false, force: true })
+                          }
+                        >
+                          <Text style={styles.loginBtnText}>{t('stats.retry')}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  }
                 })()}
               </ScrollView>
             )}

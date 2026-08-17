@@ -151,6 +151,9 @@ const STRINGS = {
     'stats.unit.minutes': 'min',
     'stats.unit.skips': 'skips',
     'stats.noAccess': 'Tu n’as pas accès aux stats.',
+    'stats.empty': 'Aucune donnée pour cette radio. Tire pour actualiser.',
+    'stats.loadError': 'Impossible d’afficher les stats.',
+    'stats.retry': 'Réessayer',
 
     'manage.title': 'Comptes app',
     'manage.heroTitle': 'Gestion',
@@ -605,6 +608,9 @@ const STRINGS = {
     'stats.note':
       'Day = people that day. Week/month = avg/day. Lifetime unique = room_time.json (+ tips/bank).',
     'stats.noAccess': 'You do not have access to stats.',
+    'stats.empty': 'No data for this radio yet. Pull to refresh.',
+    'stats.loadError': 'Could not display stats.',
+    'stats.retry': 'Retry',
 
     'manage.title': 'App accounts',
     'manage.heroTitle': 'Management',
