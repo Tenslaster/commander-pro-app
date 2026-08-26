@@ -662,9 +662,9 @@ function resolveStationStreamUrl(station, streamsMap) {
   }
   return rewritePublicUrl(url) || url;
 }
-const USER_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin', 'owner', 'dev'];
+const USER_RANKS = ['guest', 'vip', 'mod', 'admin', 'owner', 'dev'];
 const OWNER_ONLY_RANKS = new Set(['owner', 'dev']);
-const RADIO_ADMIN_RANKS = ['guest', 'vip', 'superior', 'mod', 'admin'];
+const RADIO_ADMIN_RANKS = ['guest', 'vip', 'mod', 'admin'];
 const USER_LIST_FILTER_DEFS = [
   { id: 'all', labelKey: 'filter.all', color: '#38bdf8' },
   { id: 'ranks', labelKey: 'users.filter.ranks', color: '#a78bfa' },
@@ -687,7 +687,7 @@ const USERS_BOARD_LIMIT = 200;
 const RANK_LABELS_FR = {
   guest: 'Invité',
   vip: 'VIP',
-  superior: 'Superior',
+  superior: 'VIP',
   mod: 'Modo',
   admin: 'Admin',
   owner: 'Owner',
@@ -2434,11 +2434,18 @@ function AppInner() {
   const [notifyLoading, setNotifyLoading] = useState(false);
 
   // Real user chat (public + private Owner↔Radio) — Discord replacement
-  const [mainTab, setMainTab] = useState('radios'); // radios | users | stats | chat | alerts | manage | security
+  const [mainTab, setMainTab] = useState('radios'); // radios | users | stats | chat | alerts | manage | security | securityV2
   // OWNER security console
   const [securityData, setSecurityData] = useState(null);
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityBusy, setSecurityBusy] = useState(false);
+  const [secV2Data, setSecV2Data] = useState(null);
+  const [secV2Loading, setSecV2Loading] = useState(false);
+  const [secV2Query, setSecV2Query] = useState('');
+  const [secV2Filter, setSecV2Filter] = useState('all');
+  const [secV2Station, setSecV2Station] = useState('RADIO1');
+  const [secV2Expanded, setSecV2Expanded] = useState({});
+  const [secV2SearchKey, setSecV2SearchKey] = useState(0);
   const [chatChannels, setChatChannels] = useState([]);
   const [chatUnreadTotal, setChatUnreadTotal] = useState(0);
   const [activeChat, setActiveChat] = useState(null); // channel meta
@@ -2779,6 +2786,8 @@ function AppInner() {
       appPermissions.includes('security'));
   // Only real OWNER may assign / remove the security right
   const canGrantSecurity = isOwner;
+  // SecurityV2: real OWNER only — never RADIO# masters, never grantable
+  const canSecurityV2Tab = isOwner;
   /** First tab this account may open (custom/NONE may be chat-only). */
   const firstAllowedTab =
     [
@@ -2790,6 +2799,7 @@ function AppInner() {
       [canPlaylist, 'playlist'],
       [canManageAppUsers, 'manage'],
       [canSecurityTab, 'security'],
+      [canSecurityV2Tab, 'securityV2'],
     ].find(([ok]) => ok)?.[1] || 'radios';
   const managePermGroups = useMemo(() => {
     if (!canGrantSecurity) return APP_PERM_GROUPS;
@@ -3307,6 +3317,12 @@ function AppInner() {
     setStatsError(null);
     setStatsPeriod('day');
     setStatsStation('RADIO1');
+    setSecV2Data(null);
+    setSecV2Query('');
+    setSecV2Filter('all');
+    setSecV2Station('RADIO1');
+    setSecV2Expanded({});
+    setSecV2SearchKey((k) => k + 1);
     statsFetchGenRef.current += 1;
     statsInflightRef.current = false;
     statsFpRef.current = '';
@@ -4455,6 +4471,32 @@ function AppInner() {
       }
     },
     [handleLogout, showBanner, t, isMasterLogin]
+  );
+
+  const fetchSecurityV2 = useCallback(
+    async ({ silent = true, station } = {}) => {
+      const token = authTokenRef.current;
+      if (!token || userRoleRef.current !== 'OWNER') return;
+      const st = station || secV2Station || 'RADIO1';
+      if (!silent && mountedRef.current) setSecV2Loading(true);
+      try {
+        const data = await apiFetch(
+          `/security_v2?station=${encodeURIComponent(st)}`,
+          { token, timeoutMs: 20000 }
+        );
+        if (mountedRef.current && data && typeof data === 'object') {
+          setSecV2Data(data);
+        }
+      } catch (error) {
+        if (error.code === 'UNAUTHORIZED') handleAuthFailure('api');
+        else if (!silent && mountedRef.current) {
+          showBanner(error.message || t('err.server'), 'warn');
+        }
+      } finally {
+        if (mountedRef.current) setSecV2Loading(false);
+      }
+    },
+    [handleAuthFailure, showBanner, t, secV2Station]
   );
 
   const kickSecuritySession = useCallback(
@@ -8377,6 +8419,7 @@ function AppInner() {
         'playlist',
         'manage',
         'security',
+        'securityV2',
       ].includes(mainTab)
     ) {
       setMainTab(firstAllowedTab);
@@ -8392,6 +8435,8 @@ function AppInner() {
       setMainTab(firstAllowedTab);
     else if (mainTab === 'security' && !canSecurityTab)
       setMainTab(firstAllowedTab);
+    else if (mainTab === 'securityV2' && !canSecurityV2Tab)
+      setMainTab(firstAllowedTab);
   }, [
     mainTab,
     firstAllowedTab,
@@ -8403,6 +8448,7 @@ function AppInner() {
     canPlaylist,
     canManageAppUsers,
     canSecurityTab,
+    canSecurityV2Tab,
   ]);
 
   // Stats tab: smart adaptive refresh while visible.
@@ -8478,6 +8524,16 @@ function AppInner() {
     }, 8000);
     return () => clearInterval(id);
   }, [isUnlocked, canSecurityTab, mainTab, fetchSecurity]);
+
+  useEffect(() => {
+    if (!isUnlocked || !canSecurityV2Tab || mainTab !== 'securityV2') return undefined;
+    fetchSecurityV2({ silent: true });
+    const id = setInterval(() => {
+      if (appStateRef.current !== 'active') return;
+      fetchSecurityV2({ silent: true });
+    }, 12000);
+    return () => clearInterval(id);
+  }, [isUnlocked, canSecurityV2Tab, mainTab, fetchSecurityV2, secV2Station]);
 
   const renderSectionHeader = useCallback(({ section }) => {
     if (!section?.title) return null;
@@ -8699,6 +8755,7 @@ function AppInner() {
     'playlist',
     'manage',
     'security',
+    'securityV2',
   ].includes(mainTab)
     ? mainTab
     : firstAllowedTab;
@@ -8728,6 +8785,8 @@ function AppInner() {
                         ? t('tab.playlist')
                         : safeMainTab === 'security'
                           ? t('nav.security')
+                        : safeMainTab === 'securityV2'
+                          ? t('nav.securityV2')
                         : safeMainTab === 'manage'
                           ? t('tab.manage')
                           : (
@@ -11364,8 +11423,274 @@ function AppInner() {
           </ScrollView>
         ) : null}
 
+        {/* ===== TAB: SECURITY V2 (OWNER only — Highrise IPs) ===== */}
+        {safeMainTab === 'securityV2' && canSecurityV2Tab ? (
+          <View style={styles.tabBody}>
+            {isOwner ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.usersStationBar}
+                contentContainerStyle={styles.usersStationBarInner}
+              >
+                {STATION_IDS.map((st) => (
+                  <Chip
+                    key={`v2-${st}`}
+                    label={st.replace('RADIO', 'R')}
+                    active={secV2Station === st}
+                    color={ROLE_COLORS[st] || '#f97316'}
+                    onPress={() => {
+                      setSecV2Station(st);
+                      fetchSecurityV2({ silent: false, station: st });
+                    }}
+                  />
+                ))}
+              </ScrollView>
+            ) : null}
+            <View style={styles.usersSearchRow}>
+              <DebouncedSearchInput
+                key={secV2SearchKey}
+                placeholder={t('securityV2.search')}
+                onChangeDebounced={setSecV2Query}
+                debounceMs={280}
+                containerStyle={styles.usersSearchInner}
+                inputStyle={styles.usersSearchInput}
+              />
+              <TouchableOpacity
+                onPress={() => fetchSecurityV2({ silent: false })}
+                hitSlop={8}
+                style={styles.usersRefreshBtn}
+                disabled={secV2Loading}
+                accessibilityRole="button"
+              >
+                {secV2Loading ? (
+                  <ActivityIndicator size="small" color="#f97316" />
+                ) : (
+                  <Ionicons name="refresh" size={18} color="#94a3b8" />
+                )}
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.usersFilterBar}
+              contentContainerStyle={styles.usersFilterBarInner}
+            >
+              {[
+                ['all', t('securityV2.filterAll'), '#94a3b8'],
+                ['vpn', t('securityV2.vpn'), '#f87171'],
+                ['vps', t('securityV2.vps'), '#fb923c'],
+                ['lte', t('securityV2.lte'), '#38bdf8'],
+                ['wifi', t('securityV2.wifi'), '#34d399'],
+                ['doubles', t('securityV2.doubles'), '#e879f9'],
+              ].map(([id, label, color]) => (
+                <Chip
+                  key={id}
+                  label={label}
+                  active={secV2Filter === id}
+                  color={color}
+                  onPress={() => setSecV2Filter(id)}
+                />
+              ))}
+            </ScrollView>
+            <ScrollView
+              style={styles.flex}
+              contentContainerStyle={[
+                styles.tabListContent,
+                { paddingBottom: tabPadBottom + 16 },
+              ]}
+              refreshControl={
+                <RefreshControl
+                  refreshing={secV2Loading}
+                  onRefresh={() => fetchSecurityV2({ silent: false })}
+                  tintColor="#f97316"
+                  colors={['#f97316']}
+                />
+              }
+            >
+              {secV2Data?.summary ? (
+                <View style={styles.secSummaryRow}>
+                  <View style={styles.secStat}>
+                    <Text style={styles.secStatN}>{secV2Data.summary.people ?? 0}</Text>
+                    <Text style={styles.secStatL}>{t('securityV2.people')}</Text>
+                  </View>
+                  <View style={styles.secStat}>
+                    <Text style={[styles.secStatN, { color: '#f87171' }]}>
+                      {secV2Data.summary.vpn ?? 0}
+                    </Text>
+                    <Text style={styles.secStatL}>VPN</Text>
+                  </View>
+                  <View style={styles.secStat}>
+                    <Text style={[styles.secStatN, { color: '#38bdf8' }]}>
+                      {secV2Data.summary.lte ?? 0}
+                    </Text>
+                    <Text style={styles.secStatL}>LTE</Text>
+                  </View>
+                  <View style={styles.secStat}>
+                    <Text style={[styles.secStatN, { color: '#34d399' }]}>
+                      {secV2Data.summary.wifi ?? 0}
+                    </Text>
+                    <Text style={styles.secStatL}>Wi-Fi</Text>
+                  </View>
+                  <View style={styles.secStat}>
+                    <Text style={[styles.secStatN, { color: '#4ade80' }]}>
+                      {secV2Data.summary.live ?? 0}
+                    </Text>
+                    <Text style={styles.secStatL}>{t('securityV2.live')}</Text>
+                  </View>
+                  <View style={styles.secStat}>
+                    <Text style={[styles.secStatN, { color: '#e879f9' }]}>
+                      {secV2Data.summary.doubles ?? 0}
+                    </Text>
+                    <Text style={styles.secStatL}>{t('securityV2.doubles')}</Text>
+                  </View>
+                </View>
+              ) : null}
+              {secV2Loading && !secV2Data ? (
+                <View style={styles.emptyWrap}>
+                  <ActivityIndicator color="#f97316" />
+                  <Text style={styles.emptyText}>{t('securityV2.loading')}</Text>
+                </View>
+              ) : null}
+              {(() => {
+                const q = (secV2Query || '').trim().toLowerCase();
+                let list = Array.isArray(secV2Data?.people) ? secV2Data.people : [];
+                if (secV2Filter === 'doubles') {
+                  list = list.filter((p) => !!p.double_level);
+                } else if (secV2Filter !== 'all') {
+                  list = list.filter((p) => String(p.kind || '') === secV2Filter);
+                }
+                if (q) {
+                  list = list.filter((p) => {
+                    const blob = `${p.name || ''} ${p.id || ''} ${p.ipv4 || ''} ${p.current_ip || ''} ${p.isp || ''} ${p.country || ''} ${p.kind || ''} ${p.where || ''}`.toLowerCase();
+                    if (blob.includes(q)) return true;
+                    return (p.ips || []).some(
+                      (r) =>
+                        String(r.ip || '').toLowerCase().includes(q) ||
+                        String(r.isp || '').toLowerCase().includes(q)
+                    );
+                  });
+                }
+                const kindColor = (k) =>
+                  k === 'vpn'
+                    ? '#f87171'
+                    : k === 'vps'
+                      ? '#fb923c'
+                      : k === 'lte'
+                        ? '#38bdf8'
+                        : k === 'wifi'
+                          ? '#34d399'
+                          : '#94a3b8';
+                if (!list.length && !secV2Loading) {
+                  return <Text style={styles.secEmpty}>{t('securityV2.empty')}</Text>;
+                }
+                return list.map((p) => {
+                  const kc = kindColor(p.kind);
+                  const exp = !!secV2Expanded[p.name];
+                  return (
+                    <TouchableOpacity
+                      key={`v2-${p.name}-${p.id}`}
+                      style={styles.secCard}
+                      activeOpacity={0.85}
+                      onPress={() =>
+                        setSecV2Expanded((prev) => ({
+                          ...prev,
+                          [p.name]: !prev[p.name],
+                        }))
+                      }
+                    >
+                      <View style={styles.secCardTop}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.secCardTitle} numberOfLines={1}>
+                            {p.name || '—'}
+                            {p.live ? ` · ${t('securityV2.live')}` : ''}
+                          </Text>
+                          <Text style={styles.secCardMeta} numberOfLines={1}>
+                            {p.id ? `${p.id.slice(0, 12)}…` : ''}
+                          </Text>
+                        </View>
+                        <View style={[styles.secRiskPill, { borderColor: kc }]}>
+                          <Text style={[styles.secRiskText, { color: kc }]}>
+                            {String(p.kind || '?').toUpperCase()} {p.score || 0}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={styles.secIp} selectable>
+                        {t('securityV2.current')}  {p.current_ip || p.ipv4 || '—'}
+                      </Text>
+                      {p.latest_ip && p.latest_ip !== p.current_ip ? (
+                        <Text style={styles.secCardMeta} selectable>
+                          {t('securityV2.latest')}  {p.latest_ip}
+                        </Text>
+                      ) : null}
+                      <Text style={styles.secGeo} numberOfLines={2}>
+                        {t('securityV2.where')}  {p.where || '—'}
+                      </Text>
+                      {p.double_level ? (
+                        <Text style={[styles.secCardMeta, { color: '#e879f9' }]} numberOfLines={3}>
+                          {p.double_level === 'ip'
+                            ? t('securityV2.sameIp')
+                            : t('securityV2.sameNet')}{' '}
+                          {p.double_key || ''}
+                          {' · '}
+                          {(p.double_level === 'ip'
+                            ? p.same_ip
+                            : p.same_net || []
+                          ).join(', ')}
+                        </Text>
+                      ) : null}
+                      <Text style={styles.secCardMeta}>
+                        vpn {p.vpn ?? 0} · vps {p.vps ?? 0} · lte {p.lte ?? 0} · wifi {p.wifi ?? 0}
+                        {p.has_ipv6 ? ' · IPv6' : ''}
+                      </Text>
+                      {exp ? (
+                        <View style={{ marginTop: 8, gap: 6 }}>
+                          <Text style={styles.secSection}>{t('securityV2.allIps')}</Text>
+                          {(p.ips || []).map((r, i) => (
+                            <View key={`${p.name}-ip-${r.ip}-${i}`} style={{ paddingVertical: 4 }}>
+                              <Text style={styles.secIp} selectable>
+                                {r.live ? '● ' : '○ '}
+                                {r.ip || '—'}
+                                {r.kind ? `  ·  ${String(r.kind).toUpperCase()} ${r.score || 0}` : ''}
+                              </Text>
+                              <Text style={styles.secCardMeta} numberOfLines={2}>
+                                {[r.country, r.isp].filter(Boolean).join(' · ') || '—'}
+                                {`  vpn ${r.vpn ?? 0} vps ${r.vps ?? 0} lte ${r.lte ?? 0} wifi ${r.wifi ?? 0}`}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : (
+                        <Text style={styles.secCardMeta}>
+                          {(p.ips || []).length} IP{(p.ips || []).length === 1 ? '' : 's'} · tap
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  );
+                });
+              })()}
+              {(secV2Data?.unmatched || []).length && secV2Filter === 'all' && !(secV2Query || '').trim() ? (
+                <>
+                  <Text style={styles.secSection}>{t('securityV2.unmatched')}</Text>
+                  {(secV2Data.unmatched || []).slice(0, 40).map((u, i) => (
+                    <View key={`um-${u.ip}-${i}`} style={styles.secCard}>
+                      <Text style={styles.secIp} selectable>
+                        {u.ip || '—'}
+                        {u.kind ? `  ·  ${String(u.kind).toUpperCase()} ${u.score || 0}` : ''}
+                      </Text>
+                      <Text style={styles.secGeo} numberOfLines={2}>
+                        {[u.country, u.isp].filter(Boolean).join(' · ') || '—'}
+                      </Text>
+                    </View>
+                  ))}
+                </>
+              ) : null}
+            </ScrollView>
+          </View>
+        ) : null}
+
         {/* Fallback if no tab content matched (should never happen) */}
-        {!['radios', 'users', 'stats', 'chat', 'alerts', 'playlist', 'manage', 'security'].includes(
+        {!['radios', 'users', 'stats', 'chat', 'alerts', 'playlist', 'manage', 'security', 'securityV2'].includes(
           safeMainTab
         ) ? (
           <View style={[styles.tabBody, styles.emptyWrap]}>
@@ -11480,6 +11805,19 @@ function AppInner() {
                 onPress={() => {
                   switchMainTab('security');
                   fetchSecurity({ silent: false });
+                }}
+              />
+            ) : null}
+            {canSecurityV2Tab ? (
+              <BottomNavItem
+                active={safeMainTab === 'securityV2'}
+                icon="finger-print-outline"
+                iconActive="finger-print"
+                color="#fb7185"
+                label={t('nav.securityV2')}
+                onPress={() => {
+                  switchMainTab('securityV2');
+                  fetchSecurityV2({ silent: false });
                 }}
               />
             ) : null}

@@ -8,7 +8,7 @@ export const DEFAULT_API_URL = `${PUBLIC_ORIGIN}/api`;
 export const DEFAULT_DOWNLOAD_URL = `${PUBLIC_ORIGIN}/downloads`;
 
 /** Must match app.json expo.version — hardcoded so JS-repack cannot inherit a stale native value. */
-export const APP_VERSION = '1.5.12';
+export const APP_VERSION = '1.5.13';
 
 const LOCAL_HOST_RE =
   /^(https?:\/\/)?(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/i;
