@@ -29,8 +29,8 @@ try {
 }
 
 /** Logical cache key prefix (legacy AsyncStorage used same) */
-const PREFIX = '@cp_cache_v2:';
-const LEGACY_PREFIXES = ['@cp_cache_v1:', '@cp_cache_v2:'];
+const PREFIX = '@cp_cache_v3:';
+const LEGACY_PREFIXES = ['@cp_cache_v1:', '@cp_cache_v2:', '@cp_cache_v3:'];
 
 const FORBIDDEN_CACHE_PATTERNS = [
   /"password"\s*:/i,

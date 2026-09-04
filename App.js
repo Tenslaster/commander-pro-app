@@ -11521,6 +11521,12 @@ function AppInner() {
                     <Text style={styles.secStatL}>VPN</Text>
                   </View>
                   <View style={styles.secStat}>
+                    <Text style={[styles.secStatN, { color: '#fb923c' }]}>
+                      {secV2Data.summary.vps ?? 0}
+                    </Text>
+                    <Text style={styles.secStatL}>VPS</Text>
+                  </View>
+                  <View style={styles.secStat}>
                     <Text style={[styles.secStatN, { color: '#38bdf8' }]}>
                       {secV2Data.summary.lte ?? 0}
                     </Text>
@@ -11554,11 +11560,53 @@ function AppInner() {
               ) : null}
               {(() => {
                 const q = (secV2Query || '').trim().toLowerCase();
-                let list = Array.isArray(secV2Data?.people) ? secV2Data.people : [];
+                const seenNames = new Set();
+                let list = (Array.isArray(secV2Data?.people) ? secV2Data.people : []).filter(
+                  (p) => {
+                    const k = String(p.name || '').trim().toLowerCase();
+                    if (!k || seenNames.has(k)) return false;
+                    seenNames.add(k);
+                    return true;
+                  }
+                );
                 if (secV2Filter === 'doubles') {
-                  list = list.filter((p) => !!p.double_level);
+                  let groups = Array.isArray(secV2Data?.double_groups)
+                    ? secV2Data.double_groups
+                    : [];
+                  if (q) {
+                    groups = groups.filter((g) => {
+                      const blob = `${g.ip || ''} ${(g.names || []).join(' ')}`.toLowerCase();
+                      return blob.includes(q);
+                    });
+                  }
+                  if (!groups.length && !secV2Loading) {
+                    return <Text style={styles.secEmpty}>{t('securityV2.empty')}</Text>;
+                  }
+                  return groups.map((g) => {
+                    const seenN = new Set();
+                    const names = (g.names || []).filter((n) => {
+                      const k = String(n || '').trim().toLowerCase();
+                      if (!k || seenN.has(k)) return false;
+                      seenN.add(k);
+                      return true;
+                    });
+                    if (names.length < 2) return null;
+                    return (
+                    <View key={`dbl-${g.ip}`} style={styles.secCard}>
+                      <Text style={styles.secCardTitle} selectable>
+                        {g.ip || '—'}
+                      </Text>
+                      <Text style={[styles.secCardMeta, { color: '#e879f9' }]}>
+                        {names.join(' · ')}
+                      </Text>
+                    </View>
+                    );
+                  });
                 } else if (secV2Filter !== 'all') {
-                  list = list.filter((p) => String(p.kind || '') === secV2Filter);
+                  list = list.filter((p) => {
+                    if (String(p.kind || '') === secV2Filter) return true;
+                    return (p.ips || []).some((r) => String(r.kind || '') === secV2Filter);
+                  });
                 }
                 if (q) {
                   list = list.filter((p) => {
@@ -11611,7 +11659,7 @@ function AppInner() {
                         </View>
                         <View style={[styles.secRiskPill, { borderColor: kc }]}>
                           <Text style={[styles.secRiskText, { color: kc }]}>
-                            {String(p.kind || '?').toUpperCase()} {p.score || 0}
+                            {String(p.kind || 'unknown').toUpperCase()} {p.score || 0}
                           </Text>
                         </View>
                       </View>
@@ -11669,10 +11717,25 @@ function AppInner() {
                   );
                 });
               })()}
-              {(secV2Data?.unmatched || []).length && secV2Filter === 'all' && !(secV2Query || '').trim() ? (
+              {(() => {
+                const q = (secV2Query || '').trim().toLowerCase();
+                let um = Array.isArray(secV2Data?.unmatched) ? secV2Data.unmatched : [];
+                if (secV2Filter === 'doubles') return null;
+                if (secV2Filter !== 'all') {
+                  um = um.filter((u) => String(u.kind || '') === secV2Filter);
+                }
+                if (q) {
+                  um = um.filter((u) =>
+                    `${u.ip || ''} ${u.isp || ''} ${u.country || ''} ${u.kind || ''}`
+                      .toLowerCase()
+                      .includes(q)
+                  );
+                }
+                if (!um.length) return null;
+                return (
                 <>
                   <Text style={styles.secSection}>{t('securityV2.unmatched')}</Text>
-                  {(secV2Data.unmatched || []).slice(0, 40).map((u, i) => (
+                  {um.slice(0, 40).map((u, i) => (
                     <View key={`um-${u.ip}-${i}`} style={styles.secCard}>
                       <Text style={styles.secIp} selectable>
                         {u.ip || '—'}
@@ -11684,7 +11747,8 @@ function AppInner() {
                     </View>
                   ))}
                 </>
-              ) : null}
+                );
+              })()}
             </ScrollView>
           </View>
         ) : null}
