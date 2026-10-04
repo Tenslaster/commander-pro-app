@@ -255,8 +255,8 @@ async function main() {
 
   {
     const samples = [
-      'http://crew.kingdom.forum:8000/stream',
-      'https://crew.kingdom.forum/stream2',
+      'http://kingdom.lifestyle:8000/stream',
+      'https://kingdom.lifestyle/stream2',
       'https://kingdom.lifestyle/stream3',
       'http://kingdom.lifestyle:8000/stream4',
     ];

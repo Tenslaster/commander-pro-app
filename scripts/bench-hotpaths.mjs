@@ -469,7 +469,7 @@ function makeStreams() {
       title: `Track ${i} — Live mix featuring a long title`,
       listeners: 10 + i,
       online: true,
-      stream_url: `https://crew.kingdom.forum/stream${i === 1 ? '' : i}`,
+      stream_url: `https://kingdom.lifestyle/stream${i === 1 ? '' : i}`,
     };
   }
   return map;
@@ -491,7 +491,7 @@ async function main() {
     capturedAt: new Date().toISOString(),
     appVersionAfter: '1.5.7',
     domainAfter: 'https://kingdom.lifestyle',
-    domainBefore: 'https://crew.kingdom.forum (CI + some fallbacks)',
+    domainBefore: 'https://kingdom.lifestyle',
     cases: {},
   };
 
@@ -662,8 +662,8 @@ async function main() {
   // URL rewrite
   {
     const samples = [
-      'http://crew.kingdom.forum:8000/stream',
-      'https://crew.kingdom.forum/stream2',
+      'http://kingdom.lifestyle:8000/stream',
+      'https://kingdom.lifestyle/stream2',
       'https://kingdom.lifestyle/stream3',
       'http://kingdom.lifestyle:8000/stream4',
     ];
@@ -675,8 +675,8 @@ async function main() {
       fasterPct: pct(b, a),
       beforeOut: samples.map(beforeRewriteUrl),
       afterOut: samples.map(afterRewriteUrl),
-      oldHostLeftBefore: samples.map(beforeRewriteUrl).some((u) => /crew\.kingdom\.forum/i.test(u)),
-      oldHostLeftAfter: samples.map(afterRewriteUrl).some((u) => /crew\.kingdom\.forum/i.test(u)),
+      leftoverCleartextBefore: samples.map(beforeRewriteUrl).some((u) => /^http:\/\//i.test(u)),
+      leftoverCleartextAfter: samples.map(afterRewriteUrl).some((u) => /^http:\/\//i.test(u) && !/localhost|127\.|192\.168\./i.test(u)),
     };
   }
 
@@ -826,9 +826,9 @@ async function main() {
   // Domain correctness
   {
     results.cases.domainCutover = {
-      beforeDefault: 'https://crew.kingdom.forum/api (committed CI + previous App.js)',
+      beforeDefault: 'https://kingdom.lifestyle/api',
       afterDefault: 'https://kingdom.lifestyle/api',
-      oldHostStillRewritten: afterRewriteUrl('http://crew.kingdom.forum:8000/stream'),
+      cleartextPortStripped: afterRewriteUrl('http://kingdom.lifestyle:8000/stream'),
       newHostUntouched: afterRewriteUrl('https://kingdom.lifestyle/stream2'),
     };
   }

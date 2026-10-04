@@ -1,0 +1,31 @@
+{
+  "_how": "If a line is wrong, set kind to vpn, vps, lte, or wifi. isp_contains is a substring of ISP/org (not case sensitive). Restart IP-kind or wait ~3s.",
+  "ips": {
+    "41.189.43.216": "lte",
+    "154.124.97.133": "lte",
+    "196.207.215.30": "lte"
+  },
+  "isp_contains": {
+    "lebara": "lte",
+    "iran cell": "lte",
+    "t-mobile": "lte",
+    "etisalat": "lte",
+    "global connectivity solutions": "vpn",
+    "hydra communications": "vpn",
+    "nforce entertainment": "vpn",
+    "datacamp": "vpn",
+    "m247": "vpn",
+    "packethub": "vpn",
+    "worldstream": "vpn",
+    "gthost": "vpn",
+    "proton ag": "vpn",
+    "latitude.sh": "vpn",
+    "zenlayer": "vpn",
+    "g-core labs": "vpn"
+  },
+  "users": {
+    "justt__mee": "lte",
+    "murderholic": "lte",
+    "hyliriana": "lte"
+  }
+}

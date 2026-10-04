@@ -1,0 +1,11 @@
+{
+  "stamp": "20260904_142256",
+  "copied": [
+    "highrise_ips.json",
+    "ip_kind.json",
+    "ip_kind_v2.json",
+    "ip_kind_corrections.json",
+    "stream_ipv4_live.json"
+  ],
+  "note": "Pre-wipe bind+kind snapshot for Commander PRO"
+}

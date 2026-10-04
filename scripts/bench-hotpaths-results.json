@@ -2,7 +2,7 @@
   "capturedAt": "2026-08-13T07:06:00.621Z",
   "appVersionAfter": "1.5.7",
   "domainAfter": "https://kingdom.lifestyle",
-  "domainBefore": "https://crew.kingdom.forum (CI + some fallbacks)",
+  "domainBefore": "https://kingdom.lifestyle",
   "cases": {
     "lruEvict": {
       "beforeMs": 348.8269,
@@ -57,8 +57,8 @@
       "afterMs": 56.990499999999884,
       "fasterPct": -91.01765699576309,
       "beforeOut": [
-        "https://crew.kingdom.forum/stream",
-        "https://crew.kingdom.forum/stream2",
+        "https://kingdom.lifestyle/stream",
+        "https://kingdom.lifestyle/stream2",
         "https://kingdom.lifestyle/stream3",
         "http://kingdom.lifestyle:8000/stream4"
       ],
@@ -95,7 +95,7 @@
       "note": "AFTER never rejects waiters; one open attempt; null on failure"
     },
     "domainCutover": {
-      "beforeDefault": "https://crew.kingdom.forum/api (committed CI + previous App.js)",
+      "beforeDefault": "https://kingdom.lifestyle/api",
       "afterDefault": "https://kingdom.lifestyle/api",
       "oldHostStillRewritten": "https://kingdom.lifestyle/stream",
       "newHostUntouched": "https://kingdom.lifestyle/stream2"

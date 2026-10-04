@@ -385,6 +385,7 @@ const APP_LEVEL_PRESETS = {
     'stats',
     'listen',
     'users',
+    'bank',
     'control',
     'control_start',
     'control_stop',
@@ -2758,10 +2759,12 @@ function AppInner() {
   // Push announce = real OWNER only (Centre de commande) — never grantable
   const canNotify = isOwner;
   const canUsersTab = hasAny('users', 'users_edit', 'ranks', 'bans', 'bank');
-  const canUsersEdit = hasAny('users_edit', 'ranks', 'bans', 'bank');
-  const canEditRanks = hasAny('users_edit', 'ranks');
-  const canEditBans = hasAny('users_edit', 'bans');
-  const canEditBank = hasAny('users_edit', 'bank');
+  // Old API allowed any station user with users access to edit rank/ban/bank.
+  // Keep granular flags but treat 'users' as full edit for compatibility.
+  const canUsersEdit = hasAny('users', 'users_edit', 'ranks', 'bans', 'bank');
+  const canEditRanks = hasAny('users', 'users_edit', 'ranks');
+  const canEditBans = hasAny('users', 'users_edit', 'bans');
+  const canEditBank = hasAny('users', 'users_edit', 'bank');
   // Stats only with explicit stats right (no status/users leak)
   const canStatsTab = hasPerm('stats');
   // Playlist: only playlist perms (not control umbrella)
@@ -6438,7 +6441,8 @@ function AppInner() {
   const saveStationUser = useCallback(async () => {
     const token = authTokenRef.current;
     if (!token || !selectedStationUser || userEditSaving) return;
-    if (!canUsersEdit) {
+    // OWNER / master always; app logins need users or granular edit flags
+    if (!canUsersEdit && !isOwner && !isMasterLogin) {
       Alert.alert(t('err.forbidden'), t('manage.noUsersEdit'));
       return;
     }
@@ -6512,16 +6516,23 @@ function AppInner() {
 
     setUserEditSaving(true);
     try {
+      // Always send bank. Rank/ban only when permitted — avoids rank ACL
+      // blocking a pure bank save on the server.
+      const body = {
+        station,
+        username,
+        bank: bankVal,
+      };
+      if (canEditRanks || isOwner || isMasterLogin) {
+        body.rank = rankNorm;
+      }
+      if (canEditBans || isOwner || isMasterLogin) {
+        body.banned = userEditBanned;
+      }
       const data = await apiFetch('/users/update', {
         method: 'POST',
         token,
-        body: {
-          station,
-          username,
-          rank: rankNorm,
-          banned: userEditBanned,
-          bank: bankVal,
-        },
+        body,
       });
       if (data?.station && data.station !== station) {
         setSelectedStationUser(previous);
@@ -6618,6 +6629,9 @@ function AppInner() {
     userEditBanned,
     usersStation,
     isOwner,
+    isMasterLogin,
+    canEditRanks,
+    canEditBans,
     canUsersEdit,
     fetchStationUsers,
     handleAuthFailure,
