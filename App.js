@@ -2476,6 +2476,9 @@ function AppInner() {
   const [selectedStationUser, setSelectedStationUser] = useState(null);
   const [userEditRank, setUserEditRank] = useState('guest');
   const [userEditBank, setUserEditBank] = useState('0');
+  /** Bank value when profile opened — only POST bank if user changed it */
+  const userEditBankBaselineRef = useRef('0');
+  const userEditBankTouchedRef = useRef(false);
   const [userEditBanned, setUserEditBanned] = useState(false);
   const [userEditSaving, setUserEditSaving] = useState(false);
   // Playlist AutoDJ (RADIO#/playlist folder) — per-station edit
@@ -6066,7 +6069,12 @@ function AppInner() {
         rank,
       });
       setUserEditRank(rank);
-      setUserEditBank(String(u.bank ?? 0));
+      {
+        const b0 = String(u.bank ?? 0);
+        setUserEditBank(b0);
+        userEditBankBaselineRef.current = b0;
+        userEditBankTouchedRef.current = false;
+      }
       setUserEditBanned(!!u.banned);
       // List rows are lean — pull xfer / credit / skips for the sheet only
       const token = authTokenRef.current;
@@ -6085,6 +6093,12 @@ function AppInner() {
             if (!prev || prev.username !== username) return prev;
             return normalizeUserRow({ ...prev, ...data }, returned);
           });
+          // Do not clobber an in-progress bank edit with a stale profile payload
+          if (!userEditBankTouchedRef.current && data.bank != null) {
+            const b = String(data.bank);
+            setUserEditBank(b);
+            userEditBankBaselineRef.current = b;
+          }
         })
         .catch(() => {});
     },
@@ -6489,14 +6503,58 @@ function AppInner() {
     }
 
     const rankNorm = (userEditRank || 'guest').toLowerCase();
+    // Build body first — only include bank when the field actually changed.
+    // Always POSTing bank wiped real balances with 0 after a stale list/profile load.
+    const body = {
+      station,
+      username,
+    };
+    const bankBaseline = parseInt(
+      String(userEditBankBaselineRef.current || '0').trim(),
+      10
+    );
+    const bankChanged =
+      userEditBankTouchedRef.current ||
+      (!Number.isNaN(bankVal) &&
+        !Number.isNaN(bankBaseline) &&
+        bankVal !== bankBaseline);
+    if (bankChanged) {
+      body.bank = bankVal;
+    }
+    if (canEditRanks || isOwner || isMasterLogin) {
+      body.rank = rankNorm;
+    }
+    if (canEditBans || isOwner || isMasterLogin) {
+      body.banned = userEditBanned;
+    }
+    if (
+      body.bank === undefined &&
+      body.rank === undefined &&
+      body.banned === undefined
+    ) {
+      Alert.alert(
+        'Aucun changement',
+        'Modifie la bank, le rang ou le ban avant d’enregistrer.'
+      );
+      return;
+    }
+
+    const optimisticBank =
+      body.bank !== undefined
+        ? bankVal
+        : Number(selectedStationUser.bank ?? bankBaseline) || 0;
     const optimistic = {
       ...selectedStationUser,
       station,
       username,
-      rank: rankNorm,
-      rank_level: RANK_LEVELS[rankNorm] ?? 0,
-      banned: userEditBanned,
-      bank: bankVal,
+      rank: body.rank !== undefined ? rankNorm : (selectedStationUser.rank || 'guest'),
+      rank_level:
+        RANK_LEVELS[
+          body.rank !== undefined ? rankNorm : (selectedStationUser.rank || 'guest')
+        ] ?? 0,
+      banned:
+        body.banned !== undefined ? userEditBanned : !!selectedStationUser.banned,
+      bank: optimisticBank,
       id: selectedStationUser.id || `${station}:${username}`,
     };
     setSelectedStationUser(optimistic);
@@ -6516,19 +6574,6 @@ function AppInner() {
 
     setUserEditSaving(true);
     try {
-      // Always send bank. Rank/ban only when permitted — avoids rank ACL
-      // blocking a pure bank save on the server.
-      const body = {
-        station,
-        username,
-        bank: bankVal,
-      };
-      if (canEditRanks || isOwner || isMasterLogin) {
-        body.rank = rankNorm;
-      }
-      if (canEditBans || isOwner || isMasterLogin) {
-        body.banned = userEditBanned;
-      }
       const data = await apiFetch('/users/update', {
         method: 'POST',
         token,
@@ -6549,9 +6594,11 @@ function AppInner() {
         const finalBanned =
           data?.saved === false ? !!data?.banned : !!userEditBanned;
         const finalBank =
-          data?.saved === false
-            ? Number(data?.bank ?? bankVal) || 0
-            : bankVal;
+          body.bank !== undefined
+            ? Number(body.bank)
+            : data?.bank != null
+              ? Number(data.bank)
+              : bankVal;
         const stamped = {
           ...(previous || {}),
           ...(data && typeof data === 'object' ? data : {}),
@@ -6569,7 +6616,14 @@ function AppInner() {
         };
         setSelectedStationUser(stamped);
         setUserEditRank(stamped.rank);
-        setUserEditBank(String(stamped.bank ?? 0));
+        {
+          const bSaved = String(
+            body.bank !== undefined ? body.bank : stamped.bank ?? userEditBank ?? 0
+          );
+          setUserEditBank(bSaved);
+          userEditBankBaselineRef.current = bSaved;
+          userEditBankTouchedRef.current = false;
+        }
         setUserEditBanned(!!stamped.banned);
         const patch = (prev) => {
           if (!Array.isArray(prev)) return prev;
@@ -13053,7 +13107,10 @@ function AppInner() {
                       <TextInput
                         style={styles.botConfigInput}
                         value={userEditBank}
-                        onChangeText={setUserEditBank}
+                        onChangeText={(v) => {
+                          userEditBankTouchedRef.current = true;
+                          setUserEditBank(v);
+                        }}
                         keyboardType="number-pad"
                         placeholder="0"
                         placeholderTextColor="#4b5563"
